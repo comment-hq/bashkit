@@ -22,11 +22,13 @@ use super::*;
 use crate::error::io_error_reason;
 
 impl Interpreter {
-    /// Process input redirections (< file, <<< string)
+    /// Process input redirections (< file, <<< string). `reads_line` is set
+    /// for `read`, which consumes one line of an `N<>` fd given by `<&N`.
     pub(super) async fn process_input_redirections(
         &mut self,
         existing_stdin: Option<crate::StreamData>,
         redirects: &[Redirect],
+        reads_line: bool,
     ) -> Result<Option<crate::StreamData>> {
         let mut stdin = existing_stdin;
 
@@ -97,7 +99,14 @@ impl Interpreter {
                 RedirectKind::DupInput => {
                     // <&FD - if FD is a coproc read FD, consume next line
                     let target = self.expand_word(&redirect.target).await?;
-                    if let Ok(fd) = target.parse::<i32>()
+                    let fd = target.parse::<i32>().ok();
+                    if let Some(FdTarget::ReadWrite(file)) =
+                        fd.and_then(|fd| self.exec_fd_table.get(&fd).cloned())
+                    {
+                        // <&N on an `N<>` fd reads from its offset: one line
+                        // for `read`, otherwise to EOF.
+                        stdin = Some(self.read_read_write_fd(&file, reads_line).await.into());
+                    } else if let Some(fd) = fd
                         && let Some(buf) = self.coproc_buffers.get_mut(&fd)
                     {
                         if let Some(line) = buf.pop() {
@@ -130,20 +139,10 @@ impl Interpreter {
         }
 
         // Skip the fd-table path when there are no DupOutput redirects mixed
-        // with file redirects — the simple single-pass logic is sufficient and
-        // avoids any behavioural delta for the common case.
-        let has_dup_output = redirects.iter().any(|r| r.kind == RedirectKind::DupOutput);
-        let has_file_redirect = redirects.iter().any(|r| {
-            matches!(
-                r.kind,
-                RedirectKind::Output
-                    | RedirectKind::Clobber
-                    | RedirectKind::Append
-                    | RedirectKind::OutputBoth
-            )
-        });
-
-        if has_dup_output && has_file_redirect {
+        // with file redirects, and no file opened on fd 3+ — the simple
+        // single-pass logic is sufficient and avoids any behavioural delta
+        // for the common case.
+        if needs_fd_table(redirects) {
             return self.apply_redirections_fd_table(result, redirects).await;
         }
 
@@ -275,6 +274,9 @@ impl Interpreter {
                             FdTarget::WriteFile(path, _) | FdTarget::AppendFile(path, _) => {
                                 self.fs.append_file(path, data.as_bytes()).await?;
                             }
+                            FdTarget::ReadWrite(file) => {
+                                self.write_read_write_fd(file, data.as_bytes()).await?;
+                            }
                         }
                     } else {
                         match (src_fd, target_fd) {
@@ -341,6 +343,59 @@ impl Interpreter {
         }
 
         Ok(result)
+    }
+
+    /// Write `data` over `file` at its offset, as write(2) on an `N<>` fd
+    /// does, and advance the offset past it.
+    pub(super) async fn write_read_write_fd(
+        &self,
+        file: &ReadWriteFile,
+        data: &[u8],
+    ) -> Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        let mut content = self.fs.read_file(&file.path).await.unwrap_or_default();
+        let start = *file.offset();
+        let end = start + data.len();
+        if content.len() < end {
+            content.resize(end, 0);
+        }
+        content[start..end].copy_from_slice(data);
+        self.fs.write_file(&file.path, &content).await?;
+        *file.offset() = end;
+        Ok(())
+    }
+
+    /// Read from `file` at its offset, one line (newline included) or to EOF,
+    /// and advance the offset past what was read.
+    pub(super) async fn read_read_write_fd(&self, file: &ReadWriteFile, line: bool) -> Vec<u8> {
+        let content = self.fs.read_file(&file.path).await.unwrap_or_default();
+        let start = (*file.offset()).min(content.len());
+        let rest = &content[start..];
+        let len = if line {
+            rest.iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(rest.len(), |i| i + 1)
+        } else {
+            rest.len()
+        };
+        *file.offset() = start + len;
+        rest[..len].to_vec()
+    }
+
+    /// Fail a command whose output redirect could not be opened.
+    fn redirect_open_failed(
+        &mut self,
+        mut result: ExecResult,
+        target_path: &str,
+        e: &crate::error::Error,
+    ) -> ExecResult {
+        self.clear_pending_fd_redirect_state();
+        result.stdout = crate::StreamData::new();
+        result.stderr = format!("bash: {target_path}: {}\n", io_error_reason(e)).into();
+        result.exit_code = 1;
+        result
     }
 
     /// Open `path` for `<>`: return its bytes, creating an empty file when it
@@ -418,10 +473,19 @@ impl Interpreter {
                     let target = if is_dev_null(&path) {
                         FdTarget::DevNull
                     } else {
-                        FdTarget::WriteFile(path, target_path)
+                        FdTarget::WriteFile(path.clone(), target_path.clone())
                     };
                     match redirect.fd {
                         Some(2) => fd2 = target,
+                        Some(n) if n >= 3 => {
+                            // Opening N> truncates now, even if nothing is written.
+                            if !is_dev_null(&path)
+                                && let Err(e) = self.fs.write_file(&path, b"").await
+                            {
+                                return Ok(self.redirect_open_failed(result, &target_path, &e));
+                            }
+                            self.pending_fd_targets.push((n, target));
+                        }
                         _ => fd1 = target,
                     }
                 }
@@ -431,11 +495,39 @@ impl Interpreter {
                     let target = if is_dev_null(&path) {
                         FdTarget::DevNull
                     } else {
-                        FdTarget::AppendFile(path, target_path)
+                        FdTarget::AppendFile(path.clone(), target_path.clone())
                     };
                     match redirect.fd {
                         Some(2) => fd2 = target,
+                        Some(n) if n >= 3 => {
+                            if !is_dev_null(&path)
+                                && let Err(e) = self.fs.append_file(&path, b"").await
+                            {
+                                return Ok(self.redirect_open_failed(result, &target_path, &e));
+                            }
+                            self.pending_fd_targets.push((n, target));
+                        }
                         _ => fd1 = target,
+                    }
+                }
+                RedirectKind::ReadWrite if redirect.fd.is_some_and(|fd| fd >= 1) => {
+                    // N<> file for output: writes start at offset 0 and never
+                    // truncate; the file is created if missing.
+                    let target_path = self.expand_word(&redirect.target).await?;
+                    let path = self.resolve_path(&target_path);
+                    let target = if is_dev_null(&path) {
+                        FdTarget::DevNull
+                    } else {
+                        if let Err(e) = self.open_read_write(&path).await {
+                            return Ok(self.redirect_open_failed(result, &target_path, &e));
+                        }
+                        FdTarget::ReadWrite(Arc::new(ReadWriteFile::new(path)))
+                    };
+                    match redirect.fd {
+                        Some(1) => fd1 = target,
+                        Some(2) => fd2 = target,
+                        Some(n) => self.pending_fd_targets.push((n, target)),
+                        None => {}
                     }
                 }
                 RedirectKind::OutputBoth => {
@@ -454,8 +546,17 @@ impl Interpreter {
                     let target_fd: i32 = target.parse().unwrap_or(1);
                     let src_fd = redirect.fd.unwrap_or(1);
 
-                    // Look up exec_fd_table for persistent fd targets
-                    if let Some(exec_target) = self.exec_fd_table.get(&target_fd).cloned() {
+                    // An fd opened by this command's redirects comes first, then
+                    // persistent exec fds.
+                    let own_target = self
+                        .pending_fd_targets
+                        .iter()
+                        .rev()
+                        .find(|(n, _)| *n == target_fd)
+                        .map(|(_, target)| target.clone());
+                    if let Some(exec_target) =
+                        own_target.or_else(|| self.exec_fd_table.get(&target_fd).cloned())
+                    {
                         match src_fd {
                             2 => fd2 = exec_target,
                             _ => fd1 = exec_target,
@@ -489,7 +590,6 @@ impl Interpreter {
                         }
                     }
                 }
-                // N<> output is only routed by the single-pass path above.
                 RedirectKind::Input
                 | RedirectKind::ReadWrite
                 | RedirectKind::HereString
@@ -502,7 +602,7 @@ impl Interpreter {
         // Route stdout/stderr/fd3+ to their targets (non-async to avoid state machine bloat)
         let orig_stdout = std::mem::take(&mut result.stdout);
         let orig_stderr = std::mem::take(&mut result.stderr);
-        let (new_stdout, mut new_stderr, file_writes) = route_fd_table_content(
+        let (new_stdout, mut new_stderr, file_writes, rw_writes) = route_fd_table_content(
             &orig_stdout,
             &orig_stderr,
             &fd1,
@@ -527,9 +627,29 @@ impl Interpreter {
                 return Ok(result);
             }
         }
+        for (file, content) in &rw_writes {
+            self.write_read_write_fd(file, content.as_bytes()).await?;
+        }
 
         result.stdout = new_stdout;
         result.stderr = new_stderr;
         Ok(result)
     }
+}
+
+/// Whether output redirects need the fd-table model: a dup mixed with a file
+/// redirect, or a file opened on fd 3+ (which output can only reach by dup).
+pub(super) fn needs_fd_table(redirects: &[Redirect]) -> bool {
+    let opens_file = |r: &Redirect| match r.kind {
+        RedirectKind::Output
+        | RedirectKind::Clobber
+        | RedirectKind::Append
+        | RedirectKind::OutputBoth => true,
+        RedirectKind::ReadWrite => r.fd.is_some_and(|fd| fd >= 1),
+        _ => false,
+    };
+    let has_dup_output = redirects.iter().any(|r| r.kind == RedirectKind::DupOutput);
+    redirects
+        .iter()
+        .any(|r| opens_file(r) && (has_dup_output || r.fd.is_some_and(|fd| fd >= 3)))
 }

@@ -291,6 +291,20 @@ fn subcommand_to_command(cmd: &builtins::SubCommand) -> Command {
     })
 }
 
+/// The FD of `read -u FD` / `read -uFD`, if given.
+fn read_u_fd(args: &[String]) -> Option<i32> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-u" {
+            return iter.next()?.parse().ok();
+        }
+        if let Some(fd) = arg.strip_prefix("-u").filter(|fd| !fd.is_empty()) {
+            return fd.parse().ok();
+        }
+    }
+    None
+}
+
 /// Check if a name is a shell keyword (for `command -v`/`command -V`).
 fn is_keyword(name: &str) -> bool {
     matches!(
@@ -2914,7 +2928,10 @@ impl Interpreter {
                     }
 
                     // Process input redirections before executing compound
-                    let stdin = match self.process_input_redirections(None, redirects).await {
+                    let stdin = match self
+                        .process_input_redirections(None, redirects, false)
+                        .await
+                    {
                         Ok(s) => s,
                         Err(crate::error::Error::CommandFailure(msg)) => {
                             return Ok(ExecResult::err(msg, 1));
@@ -2944,18 +2961,7 @@ impl Interpreter {
                         None
                     };
 
-                    let has_dup_output =
-                        redirects.iter().any(|r| r.kind == RedirectKind::DupOutput);
-                    let has_file_redirect = redirects.iter().any(|r| {
-                        matches!(
-                            r.kind,
-                            RedirectKind::Output
-                                | RedirectKind::Clobber
-                                | RedirectKind::Append
-                                | RedirectKind::OutputBoth
-                        )
-                    });
-                    let capture_pending_fd = has_dup_output && has_file_redirect;
+                    let capture_pending_fd = redirection::needs_fd_table(redirects);
                     if capture_pending_fd {
                         if self.pending_fd_capture_depth == 0 {
                             self.clear_pending_fd_redirect_state();
@@ -4343,31 +4349,12 @@ impl Interpreter {
 
     /// Check if `read -u FD` args reference a coproc FD and return next line if so.
     fn try_coproc_read_stdin(&mut self, args: &[String]) -> Option<String> {
-        let mut iter = args.iter();
-        while let Some(arg) = iter.next() {
-            if arg == "-u"
-                && let Some(fd_str) = iter.next()
-                && let Ok(fd) = fd_str.parse::<i32>()
-                && let Some(buf) = self.coproc_buffers.get_mut(&fd)
-            {
-                return if let Some(line) = buf.pop() {
-                    Some(format!("{}\n", line))
-                } else {
-                    Some(String::new()) // EOF
-                };
-            } else if arg.starts_with("-u")
-                && arg.len() > 2
-                && let Ok(fd) = arg[2..].parse::<i32>()
-                && let Some(buf) = self.coproc_buffers.get_mut(&fd)
-            {
-                return if let Some(line) = buf.pop() {
-                    Some(format!("{}\n", line))
-                } else {
-                    Some(String::new()) // EOF
-                };
-            }
-        }
-        None
+        let buf = self.coproc_buffers.get_mut(&read_u_fd(args)?)?;
+        Some(
+            buf.pop()
+                .map(|line| format!("{line}\n"))
+                .unwrap_or_default(),
+        )
     }
 
     /// Execute `bash` or `sh` command - interpret scripts using this interpreter.
@@ -4923,7 +4910,38 @@ enum FdTarget {
     AppendFile(PathBuf, String),
     /// Discard (/dev/null).
     DevNull,
+    /// A file opened with `N<>`: reads and writes share one offset, and dups
+    /// of the fd share it too, like one open file description.
+    ReadWrite(Arc<ReadWriteFile>),
 }
+
+/// The open file description behind an `N<> file` fd.
+#[derive(Debug)]
+struct ReadWriteFile {
+    path: PathBuf,
+    offset: std::sync::Mutex<usize>,
+}
+
+impl ReadWriteFile {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            offset: std::sync::Mutex::new(0),
+        }
+    }
+
+    fn offset(&self) -> std::sync::MutexGuard<'_, usize> {
+        self.offset
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Output routed to `N<>` fds, in routing order, merged per open file.
+type ReadWriteWrites = Vec<(Arc<ReadWriteFile>, crate::StreamData)>;
+
+/// Output routed to files, keyed by path: (content, append, display path).
+type FileWrites = std::collections::HashMap<PathBuf, (crate::StreamData, bool, String)>;
 
 /// Route fd1/fd2/fd3+ content to their targets. Extracted from the async
 /// `apply_redirections_fd_table` to keep these locals out of the async state machine.
@@ -4938,46 +4956,58 @@ fn route_fd_table_content(
 ) -> (
     crate::StreamData,
     crate::StreamData,
-    std::collections::HashMap<PathBuf, (crate::StreamData, bool, String)>,
+    FileWrites,
+    ReadWriteWrites,
 ) {
     let mut new_stdout = crate::StreamData::new();
     let mut new_stderr = crate::StreamData::new();
     let mut file_writes: std::collections::HashMap<PathBuf, (crate::StreamData, bool, String)> =
         std::collections::HashMap::new();
+    let mut rw_writes: ReadWriteWrites = Vec::new();
 
-    let route = |data: &crate::StreamData,
-                 target: &FdTarget,
-                 fw: &mut std::collections::HashMap<PathBuf, (crate::StreamData, bool, String)>,
-                 out: &mut crate::StreamData,
-                 err: &mut crate::StreamData| match target {
-        FdTarget::Stdout => {
-            if !data.is_empty() {
-                out.append(data);
+    let mut route =
+        |data: &crate::StreamData,
+         target: &FdTarget,
+         fw: &mut std::collections::HashMap<PathBuf, (crate::StreamData, bool, String)>,
+         out: &mut crate::StreamData,
+         err: &mut crate::StreamData| match target {
+            FdTarget::Stdout => {
+                if !data.is_empty() {
+                    out.append(data);
+                }
             }
-        }
-        FdTarget::Stderr => {
-            if !data.is_empty() {
-                err.append(data);
+            FdTarget::Stderr => {
+                if !data.is_empty() {
+                    err.append(data);
+                }
             }
-        }
-        FdTarget::DevNull => {}
-        FdTarget::WriteFile(p, d) => {
-            let entry = fw
-                .entry(p.clone())
-                .or_insert_with(|| (crate::StreamData::new(), false, d.clone()));
-            if !data.is_empty() {
-                entry.0.append(data);
+            FdTarget::DevNull => {}
+            FdTarget::WriteFile(p, d) => {
+                let entry = fw
+                    .entry(p.clone())
+                    .or_insert_with(|| (crate::StreamData::new(), false, d.clone()));
+                if !data.is_empty() {
+                    entry.0.append(data);
+                }
             }
-        }
-        FdTarget::AppendFile(p, d) => {
-            let entry = fw
-                .entry(p.clone())
-                .or_insert_with(|| (crate::StreamData::new(), true, d.clone()));
-            if !data.is_empty() {
-                entry.0.append(data);
+            FdTarget::AppendFile(p, d) => {
+                let entry = fw
+                    .entry(p.clone())
+                    .or_insert_with(|| (crate::StreamData::new(), true, d.clone()));
+                if !data.is_empty() {
+                    entry.0.append(data);
+                }
             }
-        }
-    };
+            FdTarget::ReadWrite(file) => {
+                if data.is_empty() {
+                    return;
+                }
+                match rw_writes.iter_mut().find(|(f, _)| Arc::ptr_eq(f, file)) {
+                    Some((_, pending)) => pending.append(data),
+                    None => rw_writes.push((file.clone(), data.clone())),
+                }
+            }
+        };
 
     route(
         orig_stdout,
@@ -4998,6 +5028,7 @@ fn route_fd_table_content(
     for (fd_num, data) in pending {
         let target = extra_fd_targets
             .iter()
+            .rev()
             .find(|(n, _)| n == fd_num)
             .map(|(_, t)| t);
         if let Some(target) = target {
@@ -5011,7 +5042,7 @@ fn route_fd_table_content(
         }
     }
 
-    (new_stdout, new_stderr, file_writes)
+    (new_stdout, new_stderr, file_writes, rw_writes)
 }
 
 impl Interpreter {
@@ -6006,7 +6037,7 @@ impl Interpreter {
 
             // Handle input redirections first
             let stdin = match self
-                .process_input_redirections(stdin, &command.redirects)
+                .process_input_redirections(stdin, &command.redirects, name == "read")
                 .await
             {
                 Ok(s) => s,
@@ -6016,9 +6047,15 @@ impl Interpreter {
                 Err(e) => return Err(e),
             };
 
-            // For `read -u FD`, check if FD is a coproc read FD and inject data as stdin
+            // For `read -u FD`, inject the next line of an `N<>` fd or a
+            // coproc read FD as stdin.
             let stdin = if name == "read" && stdin.is_none() {
-                self.try_coproc_read_stdin(&args).map(Into::into).or(stdin)
+                match read_u_fd(&args).and_then(|fd| self.exec_fd_table.get(&fd).cloned()) {
+                    Some(FdTarget::ReadWrite(file)) => {
+                        Some(self.read_read_write_fd(&file, true).await.into())
+                    }
+                    _ => self.try_coproc_read_stdin(&args).map(Into::into).or(stdin),
+                }
             } else {
                 stdin
             };
@@ -6116,11 +6153,33 @@ impl Interpreter {
                     .and_then(|val| val.parse::<i32>().ok())
             });
             match redirect.kind {
+                RedirectKind::ReadWrite
+                    if redirect.fd.or(resolved_fd_var).is_some_and(|fd| fd > 2) =>
+                {
+                    // exec N<> file: one offset for reads and writes, the file
+                    // created if missing and never truncated.
+                    let fd = redirect.fd.or(resolved_fd_var).unwrap_or_default();
+                    let target_path = self.expand_word(&redirect.target).await?;
+                    let path = self.resolve_path(&target_path);
+                    if let Err(e) = self.open_read_write(&path).await {
+                        return Ok(ExecResult::err(
+                            format!(
+                                "bash: {target_path}: {}\n",
+                                crate::error::io_error_reason(&e)
+                            ),
+                            1,
+                        ));
+                    }
+                    self.ensure_persistent_fd_capacity(fd)?;
+                    self.coproc_buffers.remove(&fd);
+                    self.exec_fd_table
+                        .insert(fd, FdTarget::ReadWrite(Arc::new(ReadWriteFile::new(path))));
+                }
                 RedirectKind::Input | RedirectKind::ReadWrite => {
                     let target_path = self.expand_word(&redirect.target).await?;
                     let path = self.resolve_path(&target_path);
-                    // exec N<> file opens N for input; the file is created if
-                    // missing. Writes through >&N append (see FdTarget).
+                    // exec <> file (fd 0-2) reads the file, which is created if
+                    // missing.
                     let content = if redirect.kind == RedirectKind::ReadWrite {
                         self.open_read_write(&path).await
                     } else {
@@ -6145,9 +6204,9 @@ impl Interpreter {
                         let lines: Vec<String> =
                             text.lines().rev().map(|l| l.to_string()).collect();
                         self.coproc_buffers.insert(fd, lines);
-                        if redirect.kind == RedirectKind::ReadWrite && fd > 2 {
-                            self.exec_fd_table
-                                .insert(fd, FdTarget::AppendFile(path, target_path));
+                        if fd > 2 {
+                            // Reopening N for input replaces what N was.
+                            self.exec_fd_table.remove(&fd);
                         }
                     } else {
                         // exec < file: redirect stdin for subsequent commands
@@ -6161,6 +6220,17 @@ impl Interpreter {
                         && let Some(fd) = fd
                     {
                         self.coproc_buffers.remove(&fd);
+                        if fd > 2 {
+                            self.exec_fd_table.remove(&fd);
+                        }
+                    } else if let (Some(fd), Ok(source)) = (fd, target.parse::<i32>())
+                        && fd > 2
+                        && let Some(entry @ FdTarget::ReadWrite(_)) =
+                            self.exec_fd_table.get(&source).cloned()
+                    {
+                        // exec N<&M on an `M<>` fd shares its offset.
+                        self.ensure_persistent_fd_capacity(fd)?;
+                        self.exec_fd_table.insert(fd, entry);
                     }
                 }
                 RedirectKind::Output | RedirectKind::Clobber => {
@@ -8985,7 +9055,10 @@ impl Interpreter {
             self.last_exit_code = 1;
             return Ok(ExecResult::err(stderr, 1));
         }
-        match self.process_input_redirections(None, redirects).await {
+        match self
+            .process_input_redirections(None, redirects, false)
+            .await
+        {
             Ok(_) => {}
             Err(crate::error::Error::CommandFailure(msg)) => {
                 self.last_exit_code = 1;
@@ -9040,7 +9113,8 @@ impl Interpreter {
                 let read = if self.logic_only_redirect_error(redirects).is_some() {
                     Err(crate::error::Error::CommandFailure(String::new()))
                 } else {
-                    self.process_input_redirections(None, redirects).await
+                    self.process_input_redirections(None, redirects, false)
+                        .await
                 };
                 match read {
                     Ok(content) => {

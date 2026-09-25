@@ -239,7 +239,6 @@ value is expanded
 ### end
 
 ### readwrite_redirect_opens_file
-### skip: `<>` (read-write fd) is not implemented — parser rejects the operator
 # Bash opens the file read-write on fd 0 without truncating it.
 echo start > /tmp/rw.txt
 exec 3<> /tmp/rw.txt
@@ -337,6 +336,49 @@ exec 4<&-
 ### expect
 line
 first=one
+### end
+
+### redirect_exec_read_write_shares_offset
+# An exec N<> fd has one offset for reads and writes, shared by its dups
+cd /tmp
+printf 'abcdef\n' > rw_e; exec 3<> rw_e; echo XY >&3; exec 3>&-; cat rw_e
+printf 'l1\nl2\nl3\n' > rw_f; exec 3<> rw_f; read -u 3 x; echo ZZ >&3; exec 3>&-
+echo "got $x"; cat rw_f
+printf 'l1\nl2\nl3\n' > rw_g; exec 5<> rw_g; read a <&5; read b <&5; cat <&5; exec 5>&-
+echo "a=$a b=$b"
+printf 'abcdef\n' > rw_h; exec 7<> rw_h; exec 8>&7; echo Q >&8; echo R >&7; exec 7>&- 8>&-
+cat rw_h
+### expect
+XY
+def
+got l1
+l1
+ZZ
+l3
+l3
+a=l1 b=l2
+Q
+R
+ef
+### end
+
+### redirect_read_write_with_dup
+# A command-scoped N<> can be the target of a dup; 1<> 2>&1 shares one offset
+cd /tmp
+printf 'abcdef\n' > rw_i; echo XY 3<> rw_i >&3; cat rw_i
+printf 'abcdefghij\n' > rw_j; { echo out; echo err >&2; } 1<> rw_j 2>&1; cat rw_j
+printf 'abc\n' > rw_k; { echo 1; echo 2; } 3<> rw_k >&3; cat rw_k
+rm -f rw_l; echo hi 3> rw_l; wc -c < rw_l
+### expect
+XY
+def
+out
+err
+ij
+1
+2
+hi
+0
 ### end
 
 ### awk_syntax_error_fails_only_the_command
