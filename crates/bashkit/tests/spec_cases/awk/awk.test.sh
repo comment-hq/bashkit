@@ -745,3 +745,14 @@ echo '5' | awk '{
 ### expect
 yes
 ### end
+
+### awk_for_empty_clauses
+# Each clause of for (init; cond; update) may be empty; an empty condition is true
+awk 'BEGIN { for (;;) { i++; if (i > 3) break }; print i }'
+awk 'BEGIN { for (j = 0; ; j++) { if (j > 2) break }; print j }'
+awk 'BEGIN { for (k = 0; k < 2; ) { k++ }; print k }'
+### expect
+4
+3
+2
+### end

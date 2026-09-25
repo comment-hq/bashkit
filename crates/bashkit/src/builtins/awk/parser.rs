@@ -651,8 +651,8 @@ impl<'a> AwkParser<'a> {
         // Not for-in, backtrack and parse C-style for
         self.pos = saved_pos;
 
-        // Parse init
-        let init_expr = self.parse_expression()?;
+        // Parse init; each clause of `for (init; cond; update)` may be empty.
+        let init_expr = self.parse_optional_for_clause(';', AwkExpr::Number(0.0))?;
         let init = match init_expr {
             AwkExpr::Assign(name, val) => AwkAction::Assign(name, *val),
             AwkExpr::ArrayAssign(name, key, val) => AwkAction::ArrayAssign(name, *key, *val),
@@ -667,9 +667,9 @@ impl<'a> AwkParser<'a> {
         }
         self.pos += 1;
 
-        // Parse condition
+        // Parse condition; an empty condition is true
         self.skip_whitespace();
-        let condition = self.parse_expression()?;
+        let condition = self.parse_optional_for_clause(';', AwkExpr::Number(1.0))?;
 
         self.skip_whitespace();
         if self.pos >= self.input.len() || self.current_char().unwrap() != ';' {
@@ -681,7 +681,7 @@ impl<'a> AwkParser<'a> {
 
         // Parse update
         self.skip_whitespace();
-        let update_expr = self.parse_expression()?;
+        let update_expr = self.parse_optional_for_clause(')', AwkExpr::Number(0.0))?;
         let update = match update_expr {
             AwkExpr::Assign(name, val) => AwkAction::Assign(name, *val),
             AwkExpr::ArrayAssign(name, key, val) => AwkAction::ArrayAssign(name, *key, *val),
@@ -709,6 +709,17 @@ impl<'a> AwkParser<'a> {
             Box::new(update),
             body,
         ))
+    }
+
+    /// Parse a `for` clause, or return `empty` when the clause is empty
+    /// (the next character is `terminator`).
+    fn parse_optional_for_clause(&mut self, terminator: char, empty: AwkExpr) -> Result<AwkExpr> {
+        self.skip_whitespace();
+        if self.current_char() == Some(terminator) {
+            Ok(empty)
+        } else {
+            self.parse_expression()
+        }
     }
 
     fn parse_while(&mut self) -> Result<AwkAction> {
