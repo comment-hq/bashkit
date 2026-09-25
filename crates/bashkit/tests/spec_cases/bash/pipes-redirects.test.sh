@@ -348,3 +348,12 @@ echo after
 rc=1
 after
 ### end
+
+### redirect_dup_to_unopened_fd_with_file_redirect
+# >&N to an fd that is not open writes nothing, also when mixed with a file redirect
+echo lost >&5 2>/dev/null
+echo lost2 >&6
+echo after
+### expect
+after
+### end

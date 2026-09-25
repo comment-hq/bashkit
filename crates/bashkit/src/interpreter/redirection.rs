@@ -477,6 +477,15 @@ impl Interpreter {
                                 }
                                 _ => {}
                             }
+                        } else if self.pending_fd_capture_depth == 0 {
+                            // fd target_fd is not open: drop the stream, as the
+                            // single-pass path does, rather than leaving it on
+                            // stdout/stderr.
+                            match src_fd {
+                                1 => fd1 = FdTarget::DevNull,
+                                2 => fd2 = FdTarget::DevNull,
+                                _ => {}
+                            }
                         }
                     }
                 }
