@@ -63,7 +63,10 @@ impl Builtin for Cat {
             .map(|vs| vs.map(|v| v.to_string_lossy().into_owned()).collect())
             .unwrap_or_default();
 
+        // Like GNU cat, an unreadable operand is reported and skipped; the
+        // remaining operands are still copied and the exit status is 1.
         let mut raw = Vec::new();
+        let mut errors = String::new();
         for file in &files {
             if file == "-" {
                 if let Some(stdin) = ctx.stdin {
@@ -79,27 +82,36 @@ impl Builtin for Cat {
                     Ok(bytes) => raw.extend_from_slice(&bytes),
                     Err(e) => {
                         let reason = crate::error::io_error_reason(&e);
-                        return Ok(ExecResult::err(format!("cat: {file}: {reason}\n"), 1));
+                        errors.push_str(&format!("cat: {file}: {reason}\n"));
                     }
                 }
             }
         }
 
-        if !(show_ends || show_tabs || show_nonprinting || number_all || number_nonblank || squeeze)
+        let mut result = if !(show_ends
+            || show_tabs
+            || show_nonprinting
+            || number_all
+            || number_nonblank
+            || squeeze)
         {
-            return Ok(ExecResult::ok_bytes(raw));
+            ExecResult::ok_bytes(raw)
+        } else {
+            ExecResult::ok(render(
+                &raw,
+                show_ends,
+                show_tabs,
+                show_nonprinting,
+                number_all,
+                number_nonblank,
+                squeeze,
+            ))
+        };
+        if !errors.is_empty() {
+            result.stderr = errors.into();
+            result.exit_code = 1;
         }
-
-        let output = render(
-            &raw,
-            show_ends,
-            show_tabs,
-            show_nonprinting,
-            number_all,
-            number_nonblank,
-            squeeze,
-        );
-        Ok(ExecResult::ok(output))
+        Ok(result)
     }
 }
 

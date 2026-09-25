@@ -79,3 +79,17 @@ echo "from-stdin" | cat -
 ### expect
 from-stdin
 ### end
+
+### cat_missing_operand_continues
+# An unreadable operand is reported; the others are still copied, exit 1
+printf 'a\n' > /tmp/cat_first
+printf 'b\n' > /tmp/cat_last
+cat /tmp/cat_first /tmp/cat_missing /tmp/cat_last 2>/dev/null
+echo "rc=$?"
+cat /tmp/cat_missing /tmp/cat_first 2>&1 >/dev/null
+### expect
+a
+b
+rc=1
+cat: /tmp/cat_missing: No such file or directory
+### end
