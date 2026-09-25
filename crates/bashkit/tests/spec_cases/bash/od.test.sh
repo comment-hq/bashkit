@@ -41,3 +41,11 @@ od --no-such-flag </dev/null 2>/dev/null; echo "exit=$?"
 ### expect
 exit=2
 ### end
+
+### od_c_columns_are_right_aligned
+# od -c prints each byte right-aligned in a 3-wide column after a space
+printf 'a\tb\n\377 x' | od -c
+### expect
+0000000   a  \t   b  \n 377       x
+0000007
+### end
