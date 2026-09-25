@@ -264,3 +264,21 @@ head: cannot open '/tmp/ht_nowhere' for reading: No such file or directory
 tail: cannot open '/tmp/ht_nowhere' for reading: No such file or directory
 rc=1
 ### end
+
+### head_tail_directory_operand
+# A directory operand is a read error; with several operands its header prints first
+mkdir -p /tmp/htd && echo a > /tmp/htf
+head /tmp/htd 2>&1; echo "rc=$?"
+head /tmp/htf /tmp/htd 2>/dev/null; echo "rc=$?"
+tail -n 1 /tmp/htd 2>&1; echo "rc=$?"
+### expect
+head: error reading '/tmp/htd': Is a directory
+rc=1
+==> /tmp/htf <==
+a
+
+==> /tmp/htd <==
+rc=1
+tail: error reading '/tmp/htd': Is a directory
+rc=1
+### end

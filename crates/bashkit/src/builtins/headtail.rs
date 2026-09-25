@@ -251,6 +251,19 @@ async fn run(cmd: &str, ctx: Context<'_>) -> Result<ExecResult> {
             };
             match ctx.fs.read_file(&path).await {
                 Ok(content) => content,
+                Err(_) if ctx.fs.stat(&path).await.is_ok_and(|m| m.file_type.is_dir()) => {
+                    // A directory opens but fails on read: GNU prints its
+                    // header first, then the read error.
+                    if multiple_files {
+                        if printed_any {
+                            out.push(b'\n');
+                        }
+                        out.extend_from_slice(format!("==> {file} <==\n").as_bytes());
+                    }
+                    printed_any = true;
+                    stderr.push_str(&format!("{cmd}: error reading '{file}': Is a directory\n"));
+                    continue;
+                }
                 Err(e) => {
                     // GNU head and tail word an unopenable operand this way.
                     let reason = crate::error::io_error_reason(&e);
