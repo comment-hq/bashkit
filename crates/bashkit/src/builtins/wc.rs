@@ -149,8 +149,16 @@ impl Builtin for Wc {
                 };
 
                 // GNU wc reports an unreadable operand by the name it was
-                // given, counts the others, and exits 1.
-                match ctx.fs.read_file(&path).await {
+                // given, counts the others, and exits 1. `-` is stdin.
+                let data = if file.as_str() == "-" {
+                    Ok(ctx
+                        .stdin
+                        .map(|stdin| stdin.as_bytes().to_vec())
+                        .unwrap_or_default())
+                } else {
+                    ctx.fs.read_file(&path).await
+                };
+                match data {
                     Ok(data) => {
                         let counts = count_data(&data);
 

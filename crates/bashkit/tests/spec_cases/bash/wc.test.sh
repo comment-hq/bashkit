@@ -152,3 +152,13 @@ wc -l /tmp/wc_missing 2>&1
 rc=1
 wc: /tmp/wc_missing: No such file or directory
 ### end
+
+### wc_dash_operand_reads_stdin
+# `-` among the operands is standard input
+printf 'a\nb\n' > /tmp/wc_dash
+printf 'x\n' | wc -l /tmp/wc_dash -
+### expect
+      2 /tmp/wc_dash
+      1 -
+      3 total
+### end
