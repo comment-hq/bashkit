@@ -7,6 +7,17 @@ use crate::error::Result;
 use crate::fs::vfs_join;
 use crate::interpreter::ExecResult;
 
+/// Split sort input into records. The separator terminates each record, so a
+/// trailing one does not start another, but empty records (blank lines) are
+/// kept, as GNU sort does.
+fn sort_records(text: &str, separator: char) -> impl Iterator<Item = &str> {
+    let body = text.strip_suffix(separator).unwrap_or(text);
+    (!text.is_empty())
+        .then(|| body.split(separator))
+        .into_iter()
+        .flatten()
+}
+
 /// Read a sort operand. Like GNU sort, an unreadable operand is fatal: sort
 /// prints nothing and exits 2, naming the operand as it was given.
 async fn read_sort_operand(
@@ -418,11 +429,7 @@ impl Builtin for Sort {
 
         if files.is_empty() {
             if let Some(stdin) = ctx.stdin {
-                for line in stdin.split(line_sep) {
-                    if !line.is_empty() {
-                        all_lines.push(line.to_string());
-                    }
-                }
+                all_lines.extend(sort_records(stdin, line_sep).map(str::to_string));
             }
         } else {
             for file in &files {
@@ -436,11 +443,7 @@ impl Builtin for Sort {
                     Ok(t) => t,
                     Err(e) => return Ok(e),
                 };
-                for line in text.split(line_sep) {
-                    if !line.is_empty() {
-                        all_lines.push(line.to_string());
-                    }
-                }
+                all_lines.extend(sort_records(&text, line_sep).map(str::to_string));
             }
         }
 
@@ -457,11 +460,8 @@ impl Builtin for Sort {
                     Ok(t) => t,
                     Err(e) => return Ok(e),
                 };
-                let lines: Vec<String> = text
-                    .split(line_sep)
-                    .filter(|l| !l.is_empty())
-                    .map(|l| l.to_string())
-                    .collect();
+                let lines: Vec<String> =
+                    sort_records(&text, line_sep).map(str::to_string).collect();
                 streams.push(lines);
             }
             // k-way merge using indices
@@ -490,7 +490,7 @@ impl Builtin for Sort {
             }
             let sep = if zero_terminated { "\0" } else { "\n" };
             let mut output = merged.join(sep);
-            if !output.is_empty() {
+            if !merged.is_empty() {
                 output.push_str(sep);
             }
             return Ok(ExecResult::ok(output));
@@ -618,7 +618,7 @@ impl Builtin for Sort {
 
         let sep = if zero_terminated { "\0" } else { "\n" };
         let mut output = all_lines.join(sep);
-        if !output.is_empty() {
+        if !all_lines.is_empty() {
             output.push_str(sep);
         }
 

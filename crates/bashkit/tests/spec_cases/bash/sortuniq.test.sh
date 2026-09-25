@@ -463,3 +463,21 @@ echo "rc=$?"
 sort: cannot read: /tmp/sort_missing: No such file or directory
 rc=2
 ### end
+
+### sort_keeps_blank_lines
+# Blank lines are records; they sort first. A lone newline is one blank record.
+printf 'b\n\na\n\n' | sort | cat -A
+printf 'b\n\na\n' | sort -u | cat -A
+printf '\n' | sort | wc -l
+printf '' | sort | wc -c
+### expect
+$
+$
+a$
+b$
+$
+a$
+b$
+1
+0
+### end
