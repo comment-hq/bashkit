@@ -279,3 +279,22 @@ printf 'a\tb c\n' | tr -d '[:blank:]'
 ### expect
 abc
 ### end
+
+### tr_octal_and_control_escapes
+# SET escapes: \NNN octal bytes (also as range ends), \t, \r and an escaped '-'
+printf 'a\xffb\xfe\n' | tr '\377\376' YZ
+printf 'a\xffb\n' | tr -d '\377' | od -An -tx1
+printf 'abc\n' | tr 'a-c' '\377' | od -An -tx1
+printf 'a\tb\rc\n' | tr '\t\r' '_-'
+printf 'a-b\n' | tr '\-' _
+printf 'abc\n' | tr '\141-\142' X
+printf 'x\001y\n' | tr -d '\000-\037'; echo
+### expect
+aYbZ
+ 61 62 0a
+ ff ff ff 0a
+a_b-c
+a_b
+XXc
+xy
+### end

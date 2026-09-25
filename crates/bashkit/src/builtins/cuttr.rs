@@ -352,8 +352,12 @@ impl Builtin for Tr {
             return Ok(Self::err("missing operand after SET1", 1));
         }
         let stdin = ctx.stdin.cloned().unwrap_or_default();
-        let byte_mode =
-            ctx.env.get("LC_ALL").is_some_and(|locale| locale == "C") || stdin.text().is_err();
+        let byte_mode = ctx.env.get("LC_ALL").is_some_and(|locale| locale == "C")
+            || stdin.text().is_err()
+            || non_flag_args
+                .iter()
+                .take(2)
+                .any(|spec| set_has_high_byte_escape(spec));
         if byte_mode && set1.iter().all(|c| (*c as u32) <= u8::MAX as u32) {
             let set2 = if non_flag_args.len() >= 2 {
                 match expand_char_set(&non_flag_args[1]) {
@@ -508,31 +512,87 @@ fn squeeze_chars(s: &str, set: &[char]) -> String {
     result
 }
 
+/// One element of a tr SET operand: a character and whether it came from a
+/// backslash escape (an escaped `-`, `[` or `:` is literal).
+#[derive(Clone, Copy, PartialEq)]
+struct SetAtom {
+    ch: char,
+    escaped: bool,
+}
+
+/// Split a SET operand into atoms, decoding GNU tr escapes: `\NNN` (one to
+/// three octal digits, a byte), `\\`, `\a`, `\b`, `\f`, `\n`, `\r`, `\t`, `\v`.
+/// Any other escaped character stands for itself.
+fn set_atoms(spec: &str) -> Vec<SetAtom> {
+    let chars: Vec<char> = spec.chars().collect();
+    let mut atoms = Vec::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
+        if c != '\\' || i == chars.len() {
+            atoms.push(SetAtom {
+                ch: c,
+                escaped: false,
+            });
+            continue;
+        }
+        let next = chars[i];
+        i += 1;
+        let ch = match next {
+            '0'..='7' => {
+                let mut value = next.to_digit(8).unwrap_or(0);
+                for _ in 0..2 {
+                    match chars.get(i).and_then(|d| d.to_digit(8)) {
+                        Some(digit) if value * 8 + digit <= 0o377 => {
+                            value = value * 8 + digit;
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                char::from(value as u8)
+            }
+            'a' => '\x07',
+            'b' => '\x08',
+            'f' => '\x0c',
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            'v' => '\x0b',
+            other => other,
+        };
+        atoms.push(SetAtom { ch, escaped: true });
+    }
+    atoms
+}
+
+/// Whether a SET operand names a byte 0x80-0xFF with an octal escape, which
+/// only makes sense byte-wise (GNU tr always works on bytes).
+fn set_has_high_byte_escape(spec: &str) -> bool {
+    set_atoms(spec)
+        .iter()
+        .any(|atom| atom.escaped && (0x80..=0xFF).contains(&(atom.ch as u32)))
+}
+
 /// Expand a character set specification like "a-z" into a list of characters.
 /// Supports POSIX character classes: [:lower:], [:upper:], [:digit:], [:alpha:], [:alnum:], [:space:]
 fn expand_char_set(spec: &str) -> std::result::Result<Vec<char>, String> {
     let mut chars = Vec::new();
-    let char_vec: Vec<char> = spec.chars().collect();
-    let len = char_vec.len();
+    let atoms = set_atoms(spec);
+    let len = atoms.len();
+    let literal = |i: usize, ch: char| atoms.get(i) == Some(&SetAtom { ch, escaped: false });
     let mut i = 0;
 
     while i < len {
         // Check for POSIX character class [:class:]
-        if char_vec[i] == '['
-            && i + 1 < len
-            && char_vec[i + 1] == ':'
-            && let Some(end) = spec[spec
-                .char_indices()
-                .nth(i + 2)
-                .map_or(spec.len(), |(pos, _)| pos)..]
-                .find(":]")
+        if literal(i, '[')
+            && literal(i + 1, ':')
+            && let Some(end) =
+                (i + 2..len.saturating_sub(1)).find(|&j| literal(j, ':') && literal(j + 1, ']'))
         {
-            let class_start = spec
-                .char_indices()
-                .nth(i + 2)
-                .map_or(spec.len(), |(pos, _)| pos);
-            let class_name = &spec[class_start..class_start + end];
-            match class_name {
+            let class_name: String = atoms[i + 2..end].iter().map(|atom| atom.ch).collect();
+            match class_name.as_str() {
                 "lower" => push_char_range(&mut chars, 'a', 'z')?,
                 "upper" => push_char_range(&mut chars, 'A', 'Z')?,
                 "digit" => push_char_range(&mut chars, '0', '9')?,
@@ -582,50 +642,16 @@ fn expand_char_set(spec: &str) -> std::result::Result<Vec<char>, String> {
                     continue;
                 }
             }
-            // Count chars in the class spec to advance properly
-            let class_char_count = class_name.chars().count();
-            i += 2 + class_char_count + 2; // skip past [: + class + :]
+            i = end + 2; // skip past [: + class + :]
             continue;
         }
 
-        let c = char_vec[i];
-        // Check for range like a-z
-        if i + 2 < len && char_vec[i + 1] == '-' {
-            let end_char = char_vec[i + 2];
-            push_char_range(&mut chars, c, end_char)?;
+        let c = atoms[i].ch;
+        // Check for range like a-z (endpoints may be escapes, e.g. \000-\037)
+        if i + 2 < len && literal(i + 1, '-') {
+            push_char_range(&mut chars, c, atoms[i + 2].ch)?;
             i += 3;
-        } else if i + 1 == len - 1 && char_vec[i + 1] == '-' {
-            // Trailing dash
-            push_char(&mut chars, c)?;
-            push_char(&mut chars, '-')?;
-            i += 2;
         } else {
-            // Handle escape sequences
-            if c == '\\' && i + 1 < len {
-                match char_vec[i + 1] {
-                    'n' => {
-                        push_char(&mut chars, '\n')?;
-                        i += 2;
-                        continue;
-                    }
-                    't' => {
-                        push_char(&mut chars, '\t')?;
-                        i += 2;
-                        continue;
-                    }
-                    '0' => {
-                        push_char(&mut chars, '\0')?;
-                        i += 2;
-                        continue;
-                    }
-                    '\\' => {
-                        push_char(&mut chars, '\\')?;
-                        i += 2;
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
             push_char(&mut chars, c)?;
             i += 1;
         }
