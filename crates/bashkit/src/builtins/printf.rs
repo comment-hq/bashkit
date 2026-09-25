@@ -4,7 +4,6 @@
 //! bashkit keeps only shell integration plus a preflight width/precision cap
 //! outside generated code so regenerating `format/` cannot erase the DoS guard.
 
-use std::borrow::Cow;
 use std::ffi::OsString;
 use std::ops::ControlFlow;
 
@@ -61,8 +60,10 @@ impl Builtin for Printf {
             if is_internal_variable(&name) {
                 return Ok(ExecResult::ok(String::new()));
             }
+            // A shell variable cannot hold NUL: bash keeps the text before it.
+            let value = output.split(|byte| *byte == 0).next().unwrap_or_default();
             ctx.variables
-                .insert(name, String::from_utf8_lossy(&output).into_owned());
+                .insert(name, String::from_utf8_lossy(value).into_owned());
             Ok(ExecResult::ok(String::new()))
         } else {
             Ok(ExecResult::ok_bytes(output))
@@ -73,8 +74,6 @@ impl Builtin for Printf {
 /// Render to bytes: escapes such as `\xff` and `\377` are single bytes, as in
 /// bash, even when they do not form valid UTF-8.
 fn render_printf(format: &str, args: &[String]) -> std::result::Result<Vec<u8>, String> {
-    let format = strip_zero_hex_escapes(format);
-    let format = format.as_ref();
     let values = format_arguments(args);
     validate_format_caps(format.as_bytes(), args)?;
 
@@ -97,37 +96,6 @@ fn render_printf(format: &str, args: &[String]) -> std::result::Result<Vec<u8>, 
     }
 
     Ok(out)
-}
-
-fn strip_zero_hex_escapes(input: &str) -> Cow<'_, str> {
-    let bytes = input.as_bytes();
-    let mut index = 0;
-    let mut output: Option<Vec<u8>> = None;
-
-    while index < bytes.len() {
-        if bytes.get(index) == Some(&b'\\') && bytes.get(index + 1) == Some(&b'x') {
-            let first = bytes.get(index + 2).copied().filter(u8::is_ascii_hexdigit);
-            let second = bytes.get(index + 3).copied().filter(u8::is_ascii_hexdigit);
-            let digits = [first, second];
-            let digit_count = digits.iter().flatten().count();
-            let zero_hex = digit_count > 0 && digits.iter().flatten().all(|digit| *digit == b'0');
-            if zero_hex {
-                output.get_or_insert_with(|| bytes[..index].to_vec());
-                index += 2 + digit_count;
-                continue;
-            }
-        }
-
-        if let Some(out) = &mut output {
-            out.push(bytes[index]);
-        }
-        index += 1;
-    }
-
-    match output {
-        Some(bytes) => Cow::Owned(String::from_utf8_lossy(&bytes).into_owned()),
-        None => Cow::Borrowed(input),
-    }
 }
 
 fn format_arguments(args: &[String]) -> Vec<FormatArgument> {
@@ -535,8 +503,8 @@ mod tests {
     }
 
     #[test]
-    fn strips_zero_hex_escapes_at_stdout_boundary() {
-        assert_eq!(render_printf("a\\x00b", &[]).unwrap(), b"ab");
+    fn emits_zero_hex_escapes_as_nul() {
+        assert_eq!(render_printf("a\\x00b", &[]).unwrap(), b"a\0b");
     }
 
     #[test]

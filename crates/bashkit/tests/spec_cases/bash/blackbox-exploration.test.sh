@@ -1461,11 +1461,14 @@ echo "!!"
 ### end
 
 ### nul_byte_handling
-### bash_diff: NUL bytes stripped in VFS string context — bash outputs 3 bytes, bashkit outputs 2
-# printf with NUL bytes — bash: 3 (includes NUL byte), bashkit: 2 (NUL stripped)
+# printf emits NUL bytes; printf -v keeps the text before the first NUL
 printf "a\x00b" | wc -c
+printf 'a\x00b\0c' | od -An -c
+printf -v x 'ab\x00cd'; echo "${#x} $x"
 ### expect
-2
+3
+   a  \0   b  \0   c
+2 ab
 ### end
 
 ### very_long_pipeline
