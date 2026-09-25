@@ -65,6 +65,25 @@ impl Interpreter {
                         }
                     }
                 }
+                RedirectKind::ReadWrite if matches!(redirect.fd, None | Some(0)) => {
+                    // <> file: stdin reads the file, which is created if missing
+                    // and never truncated.
+                    let target_path = self.expand_word(&redirect.target).await?;
+                    let path = self.resolve_path(&target_path);
+                    if is_dev_null(&path) {
+                        stdin = Some(crate::StreamData::new()); // EOF
+                    } else {
+                        match self.open_read_write(&path).await {
+                            Ok(content) => stdin = Some(content.into()),
+                            Err(e) => {
+                                return Err(crate::error::Error::CommandFailure(format!(
+                                    "bash: {target_path}: {}\n",
+                                    io_error_reason(&e)
+                                )));
+                            }
+                        }
+                    }
+                }
                 RedirectKind::HereString => {
                     // <<< string - use the target as stdin content
                     let content = self.expand_word(&redirect.target).await?;
@@ -284,6 +303,35 @@ impl Interpreter {
                         }
                     }
                 }
+                RedirectKind::ReadWrite => {
+                    // N<> file for N = 1 or 2: the output overwrites the file from
+                    // offset 0 without truncating it. Other fds are input-only here.
+                    let stream = match redirect.fd {
+                        Some(1) => &mut result.stdout,
+                        Some(2) => &mut result.stderr,
+                        _ => continue,
+                    };
+                    let target_path = self.expand_word(&redirect.target).await?;
+                    let path = self.resolve_path(&target_path);
+                    let data = std::mem::take(stream);
+                    if is_dev_null(&path) {
+                        continue;
+                    }
+                    let write = match self.open_read_write(&path).await {
+                        Ok(existing) => {
+                            let mut content = data.as_bytes().to_vec();
+                            content.extend_from_slice(existing.get(content.len()..).unwrap_or(&[]));
+                            self.fs.write_file(&path, &content).await
+                        }
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = write {
+                        result.stderr =
+                            format!("bash: {}: {}\n", target_path, io_error_reason(&e)).into();
+                        result.exit_code = 1;
+                        return Ok(result);
+                    }
+                }
                 RedirectKind::Input
                 | RedirectKind::HereString
                 | RedirectKind::HereDoc
@@ -293,6 +341,15 @@ impl Interpreter {
         }
 
         Ok(result)
+    }
+
+    /// Open `path` for `<>`: return its bytes, creating an empty file when it
+    /// does not exist. The file is never truncated.
+    pub(super) async fn open_read_write(&self, path: &std::path::Path) -> Result<Vec<u8>> {
+        if self.fs.stat(path).await.is_err() {
+            self.fs.write_file(path, b"").await?;
+        }
+        self.fs.read_file(path).await
     }
 
     pub(super) fn logic_only_redirect_error(&self, redirects: &[Redirect]) -> Option<String> {
@@ -313,6 +370,7 @@ impl Interpreter {
                     | RedirectKind::Clobber
                     | RedirectKind::Append
                     | RedirectKind::Input
+                    | RedirectKind::ReadWrite
                     | RedirectKind::OutputBoth
             ) && !word_is_literal_dev_null(&redirect.target)
             {
@@ -422,7 +480,9 @@ impl Interpreter {
                         }
                     }
                 }
+                // N<> output is only routed by the single-pass path above.
                 RedirectKind::Input
+                | RedirectKind::ReadWrite
                 | RedirectKind::HereString
                 | RedirectKind::HereDoc
                 | RedirectKind::HereDocStrip

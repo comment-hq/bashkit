@@ -60,6 +60,9 @@ pub enum Token {
     /// Redirect input (<)
     RedirectIn,
 
+    /// Open for reading and writing (<>)
+    RedirectReadWrite,
+
     /// Here document (<<)
     HereDoc,
 
@@ -134,6 +137,9 @@ pub enum Token {
 
     /// Redirect input with file descriptor (e.g., 4<)
     RedirectFdIn(i32),
+
+    /// Open for reading and writing with file descriptor (e.g., 3<>)
+    RedirectFdReadWrite(i32),
 
     /// Lexer error (e.g., unterminated string)
     Error(String),

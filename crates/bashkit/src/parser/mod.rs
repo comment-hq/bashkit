@@ -504,6 +504,17 @@ impl<'a> Parser<'a> {
                         });
                     }
                 }
+                Some(tokens::Token::RedirectReadWrite) => {
+                    self.advance();
+                    if let Ok(target) = self.expect_word() {
+                        redirects.push(Redirect {
+                            fd: None,
+                            fd_var: None,
+                            kind: RedirectKind::ReadWrite,
+                            target,
+                        });
+                    }
+                }
                 Some(tokens::Token::RedirectBoth) => {
                     self.advance();
                     if let Ok(target) = self.expect_word() {
@@ -611,6 +622,18 @@ impl<'a> Parser<'a> {
                             fd: Some(fd),
                             fd_var: None,
                             kind: RedirectKind::Input,
+                            target,
+                        });
+                    }
+                }
+                Some(tokens::Token::RedirectFdReadWrite(fd)) => {
+                    let fd = *fd;
+                    self.advance();
+                    if let Ok(target) = self.expect_word() {
+                        redirects.push(Redirect {
+                            fd: Some(fd),
+                            fd_var: None,
+                            kind: RedirectKind::ReadWrite,
                             target,
                         });
                     }
@@ -2503,6 +2526,18 @@ impl<'a> Parser<'a> {
                         });
                     }
                 }
+                tokens::Token::RedirectFdReadWrite(fd) => {
+                    let fd = *fd;
+                    self.advance();
+                    if let Ok(target) = self.expect_word() {
+                        redirects.push(Redirect {
+                            fd: Some(fd),
+                            fd_var: None,
+                            kind: RedirectKind::ReadWrite,
+                            target,
+                        });
+                    }
+                }
                 _ => break,
             }
         }
@@ -2661,6 +2696,17 @@ impl<'a> Parser<'a> {
                         target,
                     });
                 }
+                Some(tokens::Token::RedirectReadWrite) => {
+                    let fd_var = Self::pop_fd_var(&mut words);
+                    self.advance();
+                    let target = self.expect_word()?;
+                    redirects.push(Redirect {
+                        fd: None,
+                        fd_var,
+                        kind: RedirectKind::ReadWrite,
+                        target,
+                    });
+                }
                 Some(tokens::Token::HereString) => {
                     let fd_var = Self::pop_fd_var(&mut words);
                     self.advance();
@@ -2787,6 +2833,17 @@ impl<'a> Parser<'a> {
                         fd: Some(fd),
                         fd_var: None,
                         kind: RedirectKind::Input,
+                        target,
+                    });
+                }
+                Some(tokens::Token::RedirectFdReadWrite(fd)) => {
+                    let fd = *fd;
+                    self.advance();
+                    let target = self.expect_word()?;
+                    redirects.push(Redirect {
+                        fd: Some(fd),
+                        fd_var: None,
+                        kind: RedirectKind::ReadWrite,
                         target,
                     });
                 }

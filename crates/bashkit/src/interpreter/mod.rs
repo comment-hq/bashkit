@@ -6114,10 +6114,17 @@ impl Interpreter {
                     .and_then(|val| val.parse::<i32>().ok())
             });
             match redirect.kind {
-                RedirectKind::Input => {
+                RedirectKind::Input | RedirectKind::ReadWrite => {
                     let target_path = self.expand_word(&redirect.target).await?;
                     let path = self.resolve_path(&target_path);
-                    let content = match self.fs.read_file(&path).await {
+                    // exec N<> file opens N for input; the file is created if
+                    // missing. Writes through >&N append (see FdTarget).
+                    let content = if redirect.kind == RedirectKind::ReadWrite {
+                        self.open_read_write(&path).await
+                    } else {
+                        self.fs.read_file(&path).await
+                    };
+                    let content = match content {
                         Ok(c) => c,
                         Err(e) => {
                             return Ok(ExecResult::err(
@@ -6136,6 +6143,10 @@ impl Interpreter {
                         let lines: Vec<String> =
                             text.lines().rev().map(|l| l.to_string()).collect();
                         self.coproc_buffers.insert(fd, lines);
+                        if redirect.kind == RedirectKind::ReadWrite && fd > 2 {
+                            self.exec_fd_table
+                                .insert(fd, FdTarget::AppendFile(path, target_path));
+                        }
                     } else {
                         // exec < file: redirect stdin for subsequent commands
                         self.pipeline_stdin = Some(text.into());
@@ -7259,6 +7270,7 @@ impl Interpreter {
             RedirectKind::Output => ">",
             RedirectKind::Append => ">>",
             RedirectKind::Input => "<",
+            RedirectKind::ReadWrite => "<>",
             RedirectKind::HereDoc => "<<",
             RedirectKind::HereDocStrip => "<<-",
             RedirectKind::HereString => "<<<",

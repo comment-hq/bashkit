@@ -191,6 +191,9 @@ impl<'a> Lexer<'a> {
                 } else if self.peek_char() == Some('&') {
                     self.advance();
                     Some(Token::DupInput)
+                } else if self.peek_char() == Some('>') {
+                    self.advance();
+                    Some(Token::RedirectReadWrite)
                 } else {
                     Some(Token::RedirectIn)
                 }
@@ -417,6 +420,13 @@ impl<'a> Lexer<'a> {
                 }
                 let target_fd: i32 = target_str.parse().unwrap_or(0);
                 return Some(Token::DupFdIn(fd, target_fd));
+            } else if rest.starts_with("<>") {
+                // N<> - open fd N for reading and writing
+                let fd: i32 = first_digit.to_digit(10).unwrap() as i32;
+                self.advance(); // consume digit
+                self.advance(); // consume <
+                self.advance(); // consume >
+                return Some(Token::RedirectFdReadWrite(fd));
             } else if rest.starts_with('<') && !rest.starts_with("<<") {
                 // N< - input redirect with fd
                 let fd: i32 = first_digit.to_digit(10).unwrap() as i32;
@@ -2321,6 +2331,18 @@ mod tests {
         assert_eq!(lexer.next_token(), Some(Token::Semicolon));
         assert_eq!(lexer.next_token(), Some(Token::Word("e".to_string())));
         assert_eq!(lexer.next_token(), Some(Token::Background));
+        assert_eq!(lexer.next_token(), None);
+    }
+
+    #[test]
+    fn test_read_write_redirects() {
+        let mut lexer = Lexer::new("a <> b 3<> c");
+
+        assert_eq!(lexer.next_token(), Some(Token::Word("a".to_string())));
+        assert_eq!(lexer.next_token(), Some(Token::RedirectReadWrite));
+        assert_eq!(lexer.next_token(), Some(Token::Word("b".to_string())));
+        assert_eq!(lexer.next_token(), Some(Token::RedirectFdReadWrite(3)));
+        assert_eq!(lexer.next_token(), Some(Token::Word("c".to_string())));
         assert_eq!(lexer.next_token(), None);
     }
 

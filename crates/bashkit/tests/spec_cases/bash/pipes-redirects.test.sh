@@ -285,3 +285,56 @@ test -f /tmp/nullcmd_assign && echo exists
 1
 exists
 ### end
+
+### redirect_read_write_stdin
+# <> opens stdin read-write: reads the file, creates it if missing, never truncates
+cd /tmp
+printf 'hello\nworld\n' > rw_a
+cat <> rw_a
+rm -f rw_new
+cat <> rw_new; echo "rc=$?"
+[ -e rw_new ] && echo created
+{ read -r x; echo "x=$x"; } <> rw_a
+cat rw_a
+### expect
+hello
+world
+rc=0
+created
+x=hello
+hello
+world
+### end
+
+### redirect_read_write_stdout_overwrites_in_place
+# 1<> writes from offset 0 without truncating the rest of the file
+cd /tmp
+printf 'hello\nworld\n' > rw_b
+printf 'XY' 1<> rw_b
+cat rw_b
+rm -f rw_c
+echo zz 1<> rw_c
+cat rw_c
+### expect
+XYllo
+world
+zz
+### end
+
+### redirect_exec_read_write_fd
+# exec N<> opens fd N for reading and writing
+cd /tmp
+rm -f rw_d
+exec 3<> rw_d
+echo line >&3
+exec 3>&-
+cat rw_d
+printf 'one\ntwo\n' > rw_d
+exec 4<> rw_d
+read -r first <&4
+echo "first=$first"
+exec 4<&-
+### expect
+line
+first=one
+### end

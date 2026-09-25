@@ -531,6 +531,8 @@ pub enum RedirectKind {
     Append,
     /// < - redirect input
     Input,
+    /// <> - open for reading and writing (created if missing, never truncated)
+    ReadWrite,
     /// << - here document
     HereDoc,
     /// <<- - here document with leading tab stripping

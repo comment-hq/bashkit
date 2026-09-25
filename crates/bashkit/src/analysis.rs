@@ -512,6 +512,8 @@ impl Walker {
                 }
                 RedirectKind::Append => RedirectMode::Append,
                 RedirectKind::Input => RedirectMode::Read,
+                // `<>` may create the file, so report it as a write.
+                RedirectKind::ReadWrite => RedirectMode::Write,
                 // Fd duplication, here-documents and here-strings do not name a
                 // file; their target is an fd number or inline text.
                 RedirectKind::DupOutput
