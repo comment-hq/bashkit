@@ -170,3 +170,12 @@ echo -e "\0110\0145\0154\0154\0157"
 ### expect
 Hello
 ### end
+
+### echo_e_hex_and_octal_escapes_are_bytes
+# echo -e \xHH and \0NNN are single bytes even when they are not valid UTF-8
+echo -e '\xff' | wc -c
+echo -e '\0376\xc3\xa9' | cat -v
+### expect
+2
+M-~M-CM-)
+### end

@@ -23,7 +23,7 @@ impl Builtin for Echo {
         ) {
             return Ok(r);
         }
-        let mut output = String::new();
+        let mut output = Vec::new();
         let mut add_newline = true;
         let mut interpret_escapes = false;
         let mut args_iter = ctx.args.iter().peekable();
@@ -64,39 +64,41 @@ impl Builtin for Echo {
 
         for (i, arg) in remaining.iter().enumerate() {
             if i > 0 {
-                output.push(' ');
+                output.push(b' ');
             }
 
             if interpret_escapes {
-                output.push_str(&interpret_escape_sequences(arg));
+                output.extend_from_slice(&interpret_escape_sequences(arg));
             } else {
-                output.push_str(arg);
+                output.extend_from_slice(arg.as_bytes());
             }
         }
 
         if add_newline {
-            output.push('\n');
+            output.push(b'\n');
         }
 
-        Ok(ExecResult::ok(output))
+        Ok(ExecResult::ok_bytes(output))
     }
 }
 
-fn interpret_escape_sequences(s: &str) -> String {
-    let mut result = String::new();
+/// Expand `echo -e` escapes. `\0nnn` and `\xHH` are single bytes, as in bash,
+/// even when they do not form valid UTF-8.
+fn interpret_escape_sequences(s: &str) -> Vec<u8> {
+    let mut result = Vec::new();
     let mut chars = s.chars().peekable();
 
     while let Some(ch) = chars.next() {
         if ch == '\\' {
             match chars.next() {
-                Some('n') => result.push('\n'),
-                Some('t') => result.push('\t'),
-                Some('r') => result.push('\r'),
-                Some('\\') => result.push('\\'),
-                Some('a') => result.push('\x07'), // bell
-                Some('b') => result.push('\x08'), // backspace
-                Some('f') => result.push('\x0c'), // form feed
-                Some('v') => result.push('\x0b'), // vertical tab
+                Some('n') => result.push(b'\n'),
+                Some('t') => result.push(b'\t'),
+                Some('r') => result.push(b'\r'),
+                Some('\\') => result.push(b'\\'),
+                Some('a') => result.push(0x07), // bell
+                Some('b') => result.push(0x08), // backspace
+                Some('f') => result.push(0x0c), // form feed
+                Some('v') => result.push(0x0b), // vertical tab
                 Some('0') => {
                     // Octal escape \0nnn
                     let mut value = 0u8;
@@ -110,7 +112,7 @@ fn interpret_escape_sequences(s: &str) -> String {
                             }
                         }
                     }
-                    result.push(value as char);
+                    result.push(value);
                 }
                 Some('x') => {
                     // Hex escape \xHH
@@ -128,24 +130,29 @@ fn interpret_escape_sequences(s: &str) -> String {
                             }
                         }
                     }
-                    result.push(value as char);
+                    result.push(value);
                 }
                 Some('c') => {
                     // Stop output
                     break;
                 }
                 Some(other) => {
-                    result.push('\\');
-                    result.push(other);
+                    result.push(b'\\');
+                    push_char(&mut result, other);
                 }
-                None => result.push('\\'),
+                None => result.push(b'\\'),
             }
         } else {
-            result.push(ch);
+            push_char(&mut result, ch);
         }
     }
 
     result
+}
+
+fn push_char(out: &mut Vec<u8>, ch: char) {
+    let mut buf = [0; 4];
+    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
 }
 
 #[cfg(test)]
@@ -154,8 +161,12 @@ mod tests {
 
     #[test]
     fn test_escape_sequences() {
-        assert_eq!(interpret_escape_sequences("hello\\nworld"), "hello\nworld");
-        assert_eq!(interpret_escape_sequences("tab\\there"), "tab\there");
-        assert_eq!(interpret_escape_sequences("\\\\backslash"), "\\backslash");
+        assert_eq!(interpret_escape_sequences("hello\\nworld"), b"hello\nworld");
+        assert_eq!(interpret_escape_sequences("tab\\there"), b"tab\there");
+        assert_eq!(interpret_escape_sequences("\\\\backslash"), b"\\backslash");
+        assert_eq!(
+            interpret_escape_sequences("\\xff\\0376é"),
+            b"\xff\xfe\xc3\xa9"
+        );
     }
 }
