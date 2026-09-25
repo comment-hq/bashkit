@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use super::{Builtin, Context, read_stream_file};
+use super::{Builtin, Context};
 use crate::error::Result;
 use crate::fs::vfs_join;
 use crate::interpreter::ExecResult;
@@ -123,6 +123,7 @@ impl Builtin for Wc {
             .collect();
 
         let mut output = String::new();
+        let mut errors = String::new();
         let mut total_lines = 0usize;
         let mut total_words = 0usize;
         let mut total_bytes = 0usize;
@@ -147,9 +148,11 @@ impl Builtin for Wc {
                     vfs_join(ctx.cwd, file)
                 };
 
-                match read_stream_file(&*ctx.fs, &path, "wc").await {
+                // GNU wc reports an unreadable operand by the name it was
+                // given, counts the others, and exits 1.
+                match ctx.fs.read_file(&path).await {
                     Ok(data) => {
-                        let counts = count_data(data.as_bytes());
+                        let counts = count_data(&data);
 
                         total_lines += counts.lines;
                         total_words += counts.words;
@@ -162,7 +165,10 @@ impl Builtin for Wc {
                         output.push_str(&format_counts(&counts, &flags, Some(file), true));
                         output.push('\n');
                     }
-                    Err(e) => return Ok(e),
+                    Err(e) => {
+                        let reason = crate::error::io_error_reason(&e);
+                        errors.push_str(&format!("wc: {file}: {reason}\n"));
+                    }
                 }
             }
 
@@ -185,7 +191,12 @@ impl Builtin for Wc {
             }
         }
 
-        Ok(ExecResult::ok(output))
+        let mut result = ExecResult::ok(output);
+        if !errors.is_empty() {
+            result.stderr = errors.into();
+            result.exit_code = 1;
+        }
+        Ok(result)
     }
 }
 
@@ -325,7 +336,7 @@ mod tests {
         let result = Wc.execute(ctx).await.unwrap();
         assert_eq!(result.exit_code, 1);
         assert!(
-            result.stderr.starts_with("wc: /d/proj/src/missing.rs:"),
+            result.stderr.starts_with("wc: src/missing.rs:"),
             "error path is not slash-separated:\n{}",
             result.stderr
         );

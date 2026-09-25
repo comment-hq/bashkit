@@ -137,3 +137,18 @@ printf 'héllo' | wc -c
 ### expect
 6
 ### end
+
+### wc_missing_operand_continues
+# An unreadable operand is reported by name; the others and the total print, exit 1
+printf 'a\nb\n' > /tmp/wc_first
+printf 'c\n' > /tmp/wc_last
+wc -l /tmp/wc_first /tmp/wc_missing /tmp/wc_last 2>/dev/null | sed 's/^ *//'
+echo "rc=${PIPESTATUS[0]}"
+wc -l /tmp/wc_missing 2>&1
+### expect
+2 /tmp/wc_first
+1 /tmp/wc_last
+3 total
+rc=1
+wc: /tmp/wc_missing: No such file or directory
+### end
