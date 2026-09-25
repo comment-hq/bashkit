@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use super::{Builtin, Context};
+use super::{Builtin, Context, ExecutionPlan, SubCommand};
 use crate::error::Result;
 use crate::interpreter::ExecResult;
 
@@ -13,8 +13,55 @@ use crate::interpreter::ExecResult;
 /// Options:
 ///   -i   Start with empty environment
 ///
-/// If no COMMAND is given, prints the environment.
+/// If no COMMAND is given, prints the environment. Otherwise COMMAND runs
+/// through the interpreter with the `NAME=VALUE` pairs as command-scoped
+/// assignments (see [`Builtin::execution_plan`]).
 pub struct Env;
+
+/// Parsed `env` operands.
+struct EnvArgs<'a> {
+    ignore_env: bool,
+    assignments: Vec<(String, String)>,
+    /// `COMMAND [ARG]...`, empty when env only prints the environment.
+    command: &'a [String],
+}
+
+#[allow(clippy::result_large_err)]
+fn parse_env_args(args: &[String]) -> std::result::Result<EnvArgs<'_>, ExecResult> {
+    let mut ignore_env = false;
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "-i" | "--ignore-environment" | "-" => ignore_env = true,
+            "--" => {
+                i += 1;
+                break;
+            }
+            "-u" => {
+                return Err(ExecResult::err(
+                    "env: -u option not supported\n".to_string(),
+                    1,
+                ));
+            }
+            _ => break,
+        }
+        i += 1;
+    }
+    let mut assignments = Vec::new();
+    while let Some((name, value)) = args
+        .get(i)
+        .and_then(|arg| arg.split_once('='))
+        .filter(|(name, _)| !name.is_empty())
+    {
+        assignments.push((name.to_string(), value.to_string()));
+        i += 1;
+    }
+    Ok(EnvArgs {
+        ignore_env,
+        assignments,
+        command: &args[i..],
+    })
+}
 
 #[async_trait]
 impl Builtin for Env {
@@ -26,56 +73,58 @@ impl Builtin for Env {
         ) {
             return Ok(r);
         }
-        let mut ignore_env = false;
-        let mut env_vars: Vec<(String, String)> = Vec::new();
-        let mut command_start = 0;
+        let parsed = match parse_env_args(ctx.args) {
+            Ok(parsed) => parsed,
+            Err(result) => return Ok(result),
+        };
 
-        // Parse arguments
-        for (i, arg) in ctx.args.iter().enumerate() {
-            if arg == "-i" || arg == "--ignore-environment" {
-                ignore_env = true;
-            } else if arg == "-u" {
-                // -u NAME would unset a variable, but we'll skip for simplicity
-                return Ok(ExecResult::err(
-                    "env: -u option not supported\n".to_string(),
-                    1,
-                ));
-            } else if let Some((name, value)) = arg.split_once('=') {
-                env_vars.push((name.to_string(), value.to_string()));
-            } else {
-                // This is the start of the command
-                command_start = i;
-                break;
-            }
+        if !parsed.command.is_empty() {
+            // Commands run through execution_plan(); a standalone builtin
+            // context has no interpreter to run one.
+            return Ok(ExecResult::err(
+                "env: executing commands not supported in virtual mode\n".to_string(),
+                126,
+            ));
         }
 
-        // If no command, print environment
-        if command_start == 0 || command_start == ctx.args.len() {
-            let mut output = String::new();
-
-            // If not ignoring environment, print existing env vars
-            if !ignore_env {
-                let mut pairs: Vec<_> = ctx.env.iter().collect();
-                pairs.sort_by_key(|(k, _)| *k);
-                for (key, value) in pairs {
-                    output.push_str(&format!("{}={}\n", key, value));
-                }
-            }
-
-            // Print specified env vars
-            for (key, value) in env_vars {
-                output.push_str(&format!("{}={}\n", key, value));
-            }
-
-            return Ok(ExecResult::ok(output));
+        let mut variables: std::collections::BTreeMap<&str, &str> = if parsed.ignore_env {
+            Default::default()
+        } else {
+            ctx.env
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect()
+        };
+        for (key, value) in &parsed.assignments {
+            variables.insert(key, value);
         }
+        let output: String = variables
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}\n"))
+            .collect();
+        Ok(ExecResult::ok(output))
+    }
 
-        // We have a command - but since we're in a virtual environment, we can't execute arbitrary commands
-        // Return an error indicating this
-        Ok(ExecResult::err(
-            "env: executing commands not supported in virtual mode\n".to_string(),
-            126,
-        ))
+    async fn execution_plan(&self, ctx: &Context<'_>) -> Result<Option<ExecutionPlan>> {
+        if super::check_help_version(ctx.args, "", Some("")).is_some() {
+            return Ok(None);
+        }
+        let Ok(parsed) = parse_env_args(ctx.args) else {
+            return Ok(None); // Let execute() report the error
+        };
+        let Some((name, args)) = parsed.command.split_first() else {
+            return Ok(None); // No command: execute() prints the environment
+        };
+        // `-i` cannot clear inherited variables here: the plan can only add
+        // command-scoped assignments.
+        Ok(Some(ExecutionPlan::Batch {
+            commands: vec![SubCommand {
+                name: name.clone(),
+                args: args.to_vec(),
+                stdin: ctx.stdin.cloned(),
+                assignments: parsed.assignments,
+            }],
+        }))
     }
 }
 
