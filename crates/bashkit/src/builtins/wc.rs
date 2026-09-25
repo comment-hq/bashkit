@@ -124,55 +124,46 @@ impl Builtin for Wc {
 
         let mut output = String::new();
         let mut errors = String::new();
-        let mut total_lines = 0usize;
-        let mut total_words = 0usize;
-        let mut total_bytes = 0usize;
-        let mut total_chars = 0usize;
-        let mut total_max_line = 0usize;
 
         if files.is_empty() {
-            // Read from stdin
+            // Read from stdin: one count prints unpadded; several use GNU's
+            // width for a non-regular input.
             if let Some(stdin) = ctx.stdin {
                 let counts = count_data(stdin.as_bytes());
-                // Real bash: no padding for single-value stdin, padded for multiple values
-                let padded = flags.active_count() > 1;
-                output.push_str(&format_counts(&counts, &flags, None, padded));
+                let width = if flags.active_count() > 1 { 7 } else { 1 };
+                output.push_str(&format_counts(&counts, &flags, None, width));
                 output.push('\n');
             }
         } else {
-            // Read from files
+            // GNU wc reports an unreadable operand by the name it was
+            // given, counts the others, and exits 1. `-` is stdin.
+            let mut counted: Vec<(&String, TextCounts)> = Vec::new();
+            let mut regular_bytes = 0usize;
+            let mut has_non_regular = false;
             for file in &files {
-                let path = if file.starts_with('/') {
-                    std::path::PathBuf::from(file)
-                } else {
-                    vfs_join(ctx.cwd, file)
-                };
-
-                // GNU wc reports an unreadable operand by the name it was
-                // given, counts the others, and exits 1. `-` is stdin.
                 let data = if file.as_str() == "-" {
+                    has_non_regular = true;
                     Ok(ctx
                         .stdin
                         .map(|stdin| stdin.as_bytes().to_vec())
                         .unwrap_or_default())
                 } else {
-                    ctx.fs.read_file(&path).await
+                    let path = if file.starts_with('/') {
+                        std::path::PathBuf::from(file)
+                    } else {
+                        vfs_join(ctx.cwd, file)
+                    };
+                    let data = ctx.fs.read_file(&path).await;
+                    match &data {
+                        Ok(bytes) => regular_bytes += bytes.len(),
+                        // An operand that exists but is not readable as a file
+                        // (a directory) still widens the columns, as in GNU wc.
+                        Err(_) => has_non_regular |= ctx.fs.stat(&path).await.is_ok(),
+                    }
+                    data
                 };
                 match data {
-                    Ok(data) => {
-                        let counts = count_data(&data);
-
-                        total_lines += counts.lines;
-                        total_words += counts.words;
-                        total_bytes += counts.bytes;
-                        total_chars += counts.chars;
-                        if counts.max_line_length > total_max_line {
-                            total_max_line = counts.max_line_length;
-                        }
-
-                        output.push_str(&format_counts(&counts, &flags, Some(file), true));
-                        output.push('\n');
-                    }
+                    Ok(data) => counted.push((file, count_data(&data))),
                     Err(e) => {
                         let reason = crate::error::io_error_reason(&e);
                         errors.push_str(&format!("wc: {file}: {reason}\n"));
@@ -180,20 +171,21 @@ impl Builtin for Wc {
                 }
             }
 
+            let width = number_width(&flags, files.len(), regular_bytes, has_non_regular);
+            let mut totals = TextCounts::default();
+            for (file, counts) in &counted {
+                totals.add(counts);
+                output.push_str(&format_counts(counts, &flags, Some(file), width));
+                output.push('\n');
+            }
+
             // Print total if multiple files
             if files.len() > 1 {
-                let totals = TextCounts {
-                    lines: total_lines,
-                    words: total_words,
-                    bytes: total_bytes,
-                    chars: total_chars,
-                    max_line_length: total_max_line,
-                };
                 output.push_str(&format_counts(
                     &totals,
                     &flags,
                     Some(&"total".to_string()),
-                    true,
+                    width,
                 ));
                 output.push('\n');
             }
@@ -208,12 +200,44 @@ impl Builtin for Wc {
     }
 }
 
+#[derive(Default)]
 struct TextCounts {
     lines: usize,
     words: usize,
     bytes: usize,
     chars: usize,
     max_line_length: usize,
+}
+
+impl TextCounts {
+    fn add(&mut self, other: &TextCounts) {
+        self.lines += other.lines;
+        self.words += other.words;
+        self.bytes += other.bytes;
+        self.chars += other.chars;
+        self.max_line_length = self.max_line_length.max(other.max_line_length);
+    }
+}
+
+/// Column width for file operands, following GNU wc's `compute_number_width`:
+/// one count for one operand is unpadded; otherwise the width fits the summed
+/// size of the regular files, and is at least 7 when an operand is not a
+/// regular file (stdin, a directory).
+fn number_width(
+    flags: &WcFlags,
+    operands: usize,
+    regular_bytes: usize,
+    has_non_regular: bool,
+) -> usize {
+    if operands == 1 && flags.active_count() == 1 {
+        return 1;
+    }
+    let digits = regular_bytes.to_string().len();
+    if has_non_regular {
+        digits.max(7)
+    } else {
+        digits
+    }
 }
 
 /// Count stream data. Invalid UTF-8 is one character per byte, matching the
@@ -237,14 +261,13 @@ fn count_data(bytes: &[u8]) -> TextCounts {
     }
 }
 
-/// Format counts for output.
-/// When `padded` is true, right-align numbers in 8-char fields (used for file output).
-/// When `padded` is false, use minimal formatting like real bash stdin output.
+/// Format counts for output, each right-aligned to `width` and separated by
+/// a space.
 fn format_counts(
     counts: &TextCounts,
     flags: &WcFlags,
     filename: Option<&String>,
-    padded: bool,
+    width: usize,
 ) -> String {
     let mut values: Vec<usize> = Vec::new();
 
@@ -264,14 +287,8 @@ fn format_counts(
         values.push(counts.max_line_length);
     }
 
-    let result = if padded {
-        // Real bash uses 7-char wide fields separated by a space
-        let parts: Vec<String> = values.iter().map(|v| format!("{:>7}", v)).collect();
-        parts.join(" ")
-    } else {
-        let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();
-        parts.join(" ")
-    };
+    let parts: Vec<String> = values.iter().map(|v| format!("{v:>width$}")).collect();
+    let result = parts.join(" ");
 
     if let Some(name) = filename {
         format!("{} {}", result, name)

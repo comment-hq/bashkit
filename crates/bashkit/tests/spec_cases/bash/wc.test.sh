@@ -162,3 +162,25 @@ printf 'x\n' | wc -l /tmp/wc_dash -
       1 -
       3 total
 ### end
+
+### wc_column_width_fits_file_sizes
+# GNU width: one count for one file is unpadded; otherwise fit the summed file sizes
+printf 'a\nb\nc\n' > /tmp/wc_w1
+printf 'x\n' > /tmp/wc_w2
+seq 1 3000 > /tmp/wc_w3
+wc -l /tmp/wc_w1
+wc /tmp/wc_w1
+wc -l /tmp/wc_w1 /tmp/wc_w2
+wc -l /tmp/wc_w3 /tmp/wc_w1
+wc -lw /tmp/wc_w1
+### expect
+3 /tmp/wc_w1
+3 3 6 /tmp/wc_w1
+3 /tmp/wc_w1
+1 /tmp/wc_w2
+4 total
+ 3000 /tmp/wc_w3
+    3 /tmp/wc_w1
+ 3003 total
+3 3 /tmp/wc_w1
+### end
