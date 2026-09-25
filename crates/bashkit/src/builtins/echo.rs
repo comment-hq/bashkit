@@ -68,7 +68,12 @@ impl Builtin for Echo {
             }
 
             if interpret_escapes {
-                output.extend_from_slice(&interpret_escape_sequences(arg));
+                let (bytes, stop) = interpret_escape_sequences(arg);
+                output.extend_from_slice(&bytes);
+                if stop {
+                    // `\c` suppresses all further output, newline included.
+                    return Ok(ExecResult::ok_bytes(output));
+                }
             } else {
                 output.extend_from_slice(arg.as_bytes());
             }
@@ -83,8 +88,9 @@ impl Builtin for Echo {
 }
 
 /// Expand `echo -e` escapes. `\0nnn` and `\xHH` are single bytes, as in bash,
-/// even when they do not form valid UTF-8.
-fn interpret_escape_sequences(s: &str) -> Vec<u8> {
+/// even when they do not form valid UTF-8. The flag is true when `\c` ended
+/// the output.
+fn interpret_escape_sequences(s: &str) -> (Vec<u8>, bool) {
     let mut result = Vec::new();
     let mut chars = s.chars().peekable();
 
@@ -132,10 +138,7 @@ fn interpret_escape_sequences(s: &str) -> Vec<u8> {
                     }
                     result.push(value);
                 }
-                Some('c') => {
-                    // Stop output
-                    break;
-                }
+                Some('c') => return (result, true),
                 Some(other) => {
                     result.push(b'\\');
                     push_char(&mut result, other);
@@ -147,7 +150,7 @@ fn interpret_escape_sequences(s: &str) -> Vec<u8> {
         }
     }
 
-    result
+    (result, false)
 }
 
 fn push_char(out: &mut Vec<u8>, ch: char) {
@@ -161,12 +164,14 @@ mod tests {
 
     #[test]
     fn test_escape_sequences() {
-        assert_eq!(interpret_escape_sequences("hello\\nworld"), b"hello\nworld");
-        assert_eq!(interpret_escape_sequences("tab\\there"), b"tab\there");
-        assert_eq!(interpret_escape_sequences("\\\\backslash"), b"\\backslash");
+        let text = |s| interpret_escape_sequences(s).0;
+        assert_eq!(text("hello\\nworld"), b"hello\nworld");
+        assert_eq!(text("tab\\there"), b"tab\there");
+        assert_eq!(text("\\\\backslash"), b"\\backslash");
+        assert_eq!(text("\\xff\\0376é"), b"\xff\xfe\xc3\xa9");
         assert_eq!(
-            interpret_escape_sequences("\\xff\\0376é"),
-            b"\xff\xfe\xc3\xa9"
+            interpret_escape_sequences("ab\\ccd"),
+            (b"ab".to_vec(), true)
         );
     }
 }

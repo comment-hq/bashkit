@@ -179,3 +179,12 @@ echo -e '\0376\xc3\xa9' | cat -v
 2
 M-~M-CM-)
 ### end
+
+### echo_e_backslash_c_stops_all_output
+# \c ends output: later text, later arguments and the newline are dropped
+echo -e 'ab\ccd' more; echo next
+echo -e 'x\c'; echo y
+### expect
+abnext
+xy
+### end
