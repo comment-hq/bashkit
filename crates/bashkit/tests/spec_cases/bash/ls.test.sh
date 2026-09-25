@@ -179,3 +179,16 @@ ls --version | sed -E 's/^(ls) [0-9]+\.[0-9]+\.[0-9]+.*/\1 X.Y.Z/'
 ### expect
 ls X.Y.Z
 ### end
+
+### ls_long_prints_total_line
+### bash_diff: the total counts VFS sizes in whole KiB, not allocated disk blocks
+# ls -l on a directory starts with a "total" line; file operands get none
+mkdir -p /tmp/lt/sub && echo hi > /tmp/lt/a && printf '%2000s' x > /tmp/lt/big
+ls -l /tmp/lt | head -1
+ls -l /tmp/lt/a | grep -c '^total'
+ls -l /tmp/lt/sub
+### expect
+total 3
+0
+total 0
+### end

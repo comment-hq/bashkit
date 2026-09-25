@@ -291,6 +291,19 @@ async fn list_directory(
     let mut subdirs: Vec<(std::path::PathBuf, String)> = Vec::new();
 
     if opts.long {
+        // GNU ls -l starts a directory listing with the space its entries
+        // use, in 1 KiB blocks; the VFS has no blocks, so count each entry's
+        // size rounded up to whole KiB.
+        let blocks: u64 = filtered
+            .iter()
+            .map(|entry| entry.metadata.size.div_ceil(1024))
+            .sum();
+        let total = if opts.human {
+            human_readable_size(blocks * 1024).trim().to_string()
+        } else {
+            blocks.to_string()
+        };
+        output.push_str(&format!("total {total}\n"));
         for entry in &filtered {
             let mut line = format_long_entry(&entry.name, &entry.metadata, opts.human);
             if opts.classify {
