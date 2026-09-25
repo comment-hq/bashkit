@@ -7,6 +7,25 @@ use crate::error::Result;
 use crate::fs::vfs_join;
 use crate::interpreter::ExecResult;
 
+/// Read a sort operand. Like GNU sort, an unreadable operand is fatal: sort
+/// prints nothing and exits 2, naming the operand as it was given.
+async fn read_sort_operand(
+    fs: &dyn crate::fs::FileSystem,
+    path: &std::path::Path,
+    operand: &str,
+) -> std::result::Result<String, ExecResult> {
+    match fs.read_file(path).await {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(e) => Err(ExecResult::err(
+            format!(
+                "sort: cannot read: {operand}: {}\n",
+                crate::error::io_error_reason(&e)
+            ),
+            2,
+        )),
+    }
+}
+
 /// The sort builtin - sort lines of text.
 ///
 /// Usage: sort [-cfhnMruVs] [-t DELIM] [-k KEYDEF] [-o FILE] [FILE...]
@@ -413,7 +432,7 @@ impl Builtin for Sort {
                     vfs_join(ctx.cwd, file)
                 };
 
-                let text = match read_text_file(&*ctx.fs, &path, "sort").await {
+                let text = match read_sort_operand(&*ctx.fs, &path, file).await {
                     Ok(t) => t,
                     Err(e) => return Ok(e),
                 };
@@ -434,7 +453,7 @@ impl Builtin for Sort {
                 } else {
                     vfs_join(ctx.cwd, file)
                 };
-                let text = match read_text_file(&*ctx.fs, &path, "sort").await {
+                let text = match read_sort_operand(&*ctx.fs, &path, file).await {
                     Ok(t) => t,
                     Err(e) => return Ok(e),
                 };

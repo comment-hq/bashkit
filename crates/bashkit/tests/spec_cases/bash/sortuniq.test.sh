@@ -452,3 +452,14 @@ aab
 abc
 abc
 ### end
+
+### sort_missing_operand_is_fatal
+# GNU sort reads every operand before output: an unreadable one prints nothing, exit 2
+printf 'b\n' > /tmp/sort_first
+printf 'a\n' > /tmp/sort_last
+sort /tmp/sort_first /tmp/sort_missing /tmp/sort_last 2>&1
+echo "rc=$?"
+### expect
+sort: cannot read: /tmp/sort_missing: No such file or directory
+rc=2
+### end
