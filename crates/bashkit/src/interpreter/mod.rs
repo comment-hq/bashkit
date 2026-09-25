@@ -6023,10 +6023,14 @@ impl Interpreter {
 
             // If no explicit stdin, inherit from pipeline_stdin (for compound cmds in pipes).
             // For `read`, consume one line; for other commands, provide all remaining data.
+            // An empty or exhausted pipe is still connected input at EOF, as in bash,
+            // so commands read it rather than falling back to their no-input mode.
             let stdin = if stdin.is_some() {
                 stdin
             } else if let Some(ref ps) = self.pipeline_stdin {
-                if !ps.is_empty() {
+                if ps.is_empty() {
+                    Some(crate::StreamData::new())
+                } else {
                     if name == "read" {
                         // Consume one line from pipeline stdin
                         let data = ps.clone();
@@ -6045,8 +6049,6 @@ impl Interpreter {
                     } else {
                         Some(ps.clone())
                     }
-                } else {
-                    None
                 }
             } else {
                 None

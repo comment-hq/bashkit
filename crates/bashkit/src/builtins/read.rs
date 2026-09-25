@@ -83,8 +83,8 @@ impl Builtin for Read {
         // This prevents the common `while read line || [[ -n "$line" ]]`
         // pattern from looping infinitely on the stale last value.
         let input = match input {
-            Some(s) => s,
-            None => {
+            Some(s) if !s.is_empty() => s,
+            _ => {
                 let var_names: Vec<&str> = if var_args.is_empty() {
                     vec!["REPLY"]
                 } else {
