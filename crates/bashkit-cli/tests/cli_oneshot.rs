@@ -140,12 +140,34 @@ fn function_recursion_is_bounded_on_a_two_mib_stack() {
     for script in ["f() { f; }; f", "f() { g; }; g() { f; }; f"] {
         let out = run_with_two_mib_stack(script);
         assert_eq!(out.status.code(), Some(1), "{script}: {}", stderr(&out));
+        // Whichever fires first: the depth limit, or the stack check (debug
+        // builds use enough stack per call to reach it before depth 16).
         assert!(
-            stderr(&out).contains("maximum function depth exceeded"),
+            stderr(&out).contains("maximum function depth exceeded")
+                || stderr(&out).contains("host stack nearly exhausted"),
             "{script}: {}",
             stderr(&out)
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn nested_function_bodies_stop_before_the_stack_overflows() {
+    // Each call nests ten groups and a pipeline, so the stack runs out before
+    // the depth limit of 16 is reached.
+    let script = format!(
+        "f() {{ {} f | cat; {} }}; f",
+        "{ ".repeat(10),
+        "}; ".repeat(10)
+    );
+    let out = run_with_two_mib_stack(&script);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("host stack nearly exhausted"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[cfg(unix)]

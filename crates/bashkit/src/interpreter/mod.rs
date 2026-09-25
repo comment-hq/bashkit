@@ -2865,6 +2865,8 @@ impl Interpreter {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ExecResult>> + Send + 'a>> {
         Box::pin(async move {
             self.check_cancelled()?;
+            // THREAT[TM-DOS-020]: nested commands recurse on the host stack.
+            crate::limits::check_stack()?;
             // Update current line for $LINENO
             self.current_line = Self::command_line(command);
 

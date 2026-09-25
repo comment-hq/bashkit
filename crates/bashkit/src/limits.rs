@@ -32,9 +32,83 @@ use std::time::Duration;
 use crate::time_compat::Instant;
 
 // THREAT[TM-DOS-020]: 100 nested interpreter frames overflow a 2 MiB host
-// stack before the configurable counter fires. Keep a hard ceiling even when
-// embedders request a higher logical recursion limit.
+// stack before the configurable counter fires. Where the platform reports the
+// thread's stack bounds, every command and function call first checks that
+// `STACK_RED_ZONE` bytes remain, so recursion fails cleanly at any depth and
+// embedders may raise `max_function_depth` on a larger stack. Elsewhere the
+// depth keeps a hard ceiling.
 const HARD_MAX_FUNCTION_DEPTH: usize = 16;
+
+/// Host stack a single command may need beyond the check that admits it.
+pub(crate) const STACK_RED_ZONE: usize = 256 * 1024;
+
+/// Fail when less than `STACK_RED_ZONE` bytes of host stack remain.
+#[inline(never)]
+pub(crate) fn check_stack() -> Result<(), LimitExceeded> {
+    let marker = 0u8;
+    let here = std::ptr::addr_of!(marker) as usize;
+    match stack_low_bound() {
+        Some(low) if here.saturating_sub(low) < STACK_RED_ZONE => {
+            Err(LimitExceeded::StackExhausted)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The lowest address of the current thread's stack, when the platform reports it.
+fn stack_low_bound() -> Option<usize> {
+    thread_local! {
+        static LOW: std::cell::Cell<Option<Option<usize>>> = const { std::cell::Cell::new(None) };
+    }
+    LOW.with(|low| {
+        low.get().unwrap_or_else(|| {
+            let bound = query_stack_low_bound();
+            low.set(Some(bound));
+            bound
+        })
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn query_stack_low_bound() -> Option<usize> {
+    // SAFETY: `attr` is initialized by pthread_getattr_np before it is read and
+    // destroyed once; the out-pointers are valid locals.
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+            return None;
+        }
+        let (mut addr, mut size) = (std::ptr::null_mut(), 0);
+        let ok = libc::pthread_attr_getstack(&attr, &mut addr, &mut size) == 0;
+        libc::pthread_attr_destroy(&mut attr);
+        (ok && size > 0).then_some(addr as usize)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn query_stack_low_bound() -> Option<usize> {
+    // SAFETY: both calls only read the current thread's attributes.
+    unsafe {
+        let thread = libc::pthread_self();
+        let top = libc::pthread_get_stackaddr_np(thread) as usize;
+        top.checked_sub(libc::pthread_get_stacksize_np(thread))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn query_stack_low_bound() -> Option<usize> {
+    None
+}
+
+/// The function depth ceiling: the configured limit where the stack is
+/// checked, else at most `HARD_MAX_FUNCTION_DEPTH`.
+fn function_depth_ceiling(limits: &ExecutionLimits) -> usize {
+    if stack_low_bound().is_some() {
+        limits.max_function_depth
+    } else {
+        limits.max_function_depth.min(HARD_MAX_FUNCTION_DEPTH)
+    }
+}
 
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
@@ -72,7 +146,9 @@ pub struct ExecutionLimits {
     pub max_total_loop_iterations: usize,
 
     /// Maximum function call depth (recursion limit)
-    /// Default: 16; values above 16 are capped for host stack safety.
+    /// Default: 16. Where the platform reports thread stack bounds, recursion
+    /// also stops when the host stack runs low; elsewhere values above 16 are
+    /// capped for host stack safety.
     pub max_function_depth: usize,
 
     /// Execution timeout
@@ -624,10 +700,11 @@ impl ExecutionCounters {
         });
 
         // Check before incrementing so we don't leave invalid state on failure
-        let max_depth = limits.max_function_depth.min(HARD_MAX_FUNCTION_DEPTH);
+        let max_depth = function_depth_ceiling(limits);
         if self.function_depth >= max_depth {
             return Err(LimitExceeded::MaxFunctionDepth(max_depth));
         }
+        check_stack()?;
         self.function_depth += 1;
         Ok(())
     }
@@ -695,6 +772,9 @@ pub enum LimitExceeded {
 
     #[error("maximum subshell depth exceeded ({0})")]
     MaxSubshellDepth(usize),
+
+    #[error("host stack nearly exhausted")]
+    StackExhausted,
 
     #[error("maximum file descriptors exceeded ({0})")]
     MaxFileDescriptors(usize),
@@ -1614,7 +1694,7 @@ mod tests {
         assert_eq!(limits.max_commands, 10_000);
         assert_eq!(limits.max_loop_iterations, 10_000);
         assert_eq!(limits.max_total_loop_iterations, 1_000_000);
-        assert_eq!(limits.max_function_depth, HARD_MAX_FUNCTION_DEPTH);
+        assert_eq!(limits.max_function_depth, 16);
         assert_eq!(limits.timeout, Duration::from_secs(30));
         assert_eq!(limits.parser_timeout, Duration::from_secs(5));
         assert_eq!(limits.max_input_bytes, 10_000_000);
@@ -1761,16 +1841,45 @@ mod tests {
     }
 
     #[test]
-    fn function_depth_has_a_hard_stack_safety_ceiling() {
+    fn function_depth_ceiling_depends_on_stack_bounds() {
         let limits = ExecutionLimits::new().max_function_depth(1_000);
         let mut counters = ExecutionCounters::new();
-        for _ in 0..HARD_MAX_FUNCTION_DEPTH {
+        let ceiling = if stack_low_bound().is_some() {
+            1_000
+        } else {
+            HARD_MAX_FUNCTION_DEPTH
+        };
+        for _ in 0..ceiling {
             assert!(counters.push_function(&limits).is_ok());
         }
         assert!(matches!(
             counters.push_function(&limits),
-            Err(LimitExceeded::MaxFunctionDepth(HARD_MAX_FUNCTION_DEPTH))
+            Err(LimitExceeded::MaxFunctionDepth(max)) if max == ceiling
         ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn stack_check_fails_inside_the_red_zone() {
+        assert!(check_stack().is_ok());
+        fn descend(low: usize) -> bool {
+            let pad = std::hint::black_box([0u8; 16 * 1024]);
+            let here = std::ptr::addr_of!(pad) as usize;
+            if here.saturating_sub(low) < STACK_RED_ZONE / 2 {
+                return check_stack().is_err();
+            }
+            descend(low) && std::hint::black_box(pad[0]) == 0
+        }
+        let result = std::thread::Builder::new()
+            .stack_size(4 * STACK_RED_ZONE)
+            .spawn(move || {
+                let low = stack_low_bound().expect("stack bounds on this thread");
+                descend(low)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(result, "check_stack admits a call inside the red zone");
     }
 
     #[test]

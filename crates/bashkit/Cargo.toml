@@ -372,6 +372,10 @@ required-features = ["sqlite"]
 name = "sqlite_workflow"
 required-features = ["sqlite"]
 
+# Thread stack bounds for the recursion stack check (limits.rs).
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "0.2"
+
 # Additional tokio features needed only on native (not WASM)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "fs"] }
