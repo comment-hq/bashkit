@@ -338,3 +338,13 @@ exec 4<&-
 line
 first=one
 ### end
+
+### awk_syntax_error_fails_only_the_command
+# A program that does not parse fails awk (gawk: exit 1); the script continues
+awk 'BEGIN { x = ( }' 2>/dev/null
+echo "rc=$?"
+echo after
+### expect
+rc=1
+after
+### end

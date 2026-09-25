@@ -678,7 +678,15 @@ impl Builtin for Awk {
 
         let program_str = normalize_awk_newlines(&program_str);
         let mut parser = AwkParser::new(&program_str);
-        let program = parser.parse()?;
+        // A program that does not parse fails this command (exit 1, as gawk
+        // does) rather than the whole script.
+        let program = match parser.parse() {
+            Ok(program) => program,
+            Err(Error::Execution(message)) => {
+                return Ok(ExecResult::err(format!("{message}\n"), 1));
+            }
+            Err(e) => return Err(e),
+        };
 
         let mut interp = AwkInterpreter::new();
         interp.execution_budget = ctx

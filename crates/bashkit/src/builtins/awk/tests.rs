@@ -431,10 +431,12 @@ async fn test_awk_unspaced_plus_minus_after_number() {
         assert_eq!(result.stdout, expected, "program: {program}");
     }
     // Negative: a lone '.' is still not a number.
-    let err = run_awk(&["BEGIN{print .}"], None).await.unwrap_err();
+    let result = run_awk(&["BEGIN{print .}"], None).await.unwrap();
+    assert_eq!(result.exit_code, 1);
     assert!(
-        err.to_string().contains("invalid number"),
-        "unexpected: {err}"
+        result.stderr.contains("invalid number"),
+        "unexpected: {}",
+        result.stderr
     );
 }
 
@@ -635,9 +637,10 @@ async fn test_awk_rejects_too_many_multi_subscripts() {
         .join(",");
     let program = format!("BEGIN {{ a[{subscripts}] = 1 }}");
 
-    let err = run_awk(&[&program], Some("")).await.unwrap_err();
+    let result = run_awk(&[&program], Some("")).await.unwrap();
 
-    assert!(err.to_string().contains("too many array subscripts"));
+    assert_eq!(result.exit_code, 1);
+    assert!(result.stderr.contains("too many array subscripts"));
 }
 
 #[tokio::test]
@@ -762,11 +765,12 @@ async fn test_awk_print_redirect_multiple_to_same_file() {
 async fn test_awk_print_redirect_pipe_unsupported() {
     // Pipe output should return clear error
     let (result, _fs) = run_awk_with_fs(&[r#"BEGIN{print "hello" | "cat"}"#], None).await;
-    assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
+    let result = result.unwrap();
+    assert_eq!(result.exit_code, 1);
     assert!(
-        err_msg.contains("pipe"),
-        "expected pipe error, got: {err_msg}"
+        result.stderr.contains("pipe"),
+        "expected pipe error, got: {}",
+        result.stderr
     );
 }
 
