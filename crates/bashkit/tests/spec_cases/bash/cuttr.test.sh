@@ -298,3 +298,14 @@ a_b
 XXc
 xy
 ### end
+
+### tr_works_on_bytes
+# GNU tr treats SETs and input as bytes, not characters
+printf 'h\303\251llo\n' | tr 'é' 'x'
+printf '\303\251\n' | tr -d '\303' | od -An -c
+printf 'a\303\251\n' | tr -c 'a\n' '_'
+### expect
+hxxllo
+ 251  \n
+a__
+### end

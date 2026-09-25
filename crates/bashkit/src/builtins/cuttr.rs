@@ -344,106 +344,34 @@ impl Builtin for Tr {
             return Ok(Self::err("missing operand", 1));
         }
 
-        let mut set1 = match expand_char_set(&non_flag_args[0]) {
+        let set1 = match expand_char_set(&non_flag_args[0]) {
             Ok(set) => set,
             Err(msg) => return Ok(Self::err(&msg, 1)),
         };
         if !delete && !squeeze && non_flag_args.len() < 2 {
             return Ok(Self::err("missing operand after SET1", 1));
         }
-        let stdin = ctx.stdin.cloned().unwrap_or_default();
-        let byte_mode = ctx.env.get("LC_ALL").is_some_and(|locale| locale == "C")
-            || stdin.text().is_err()
-            || non_flag_args
-                .iter()
-                .take(2)
-                .any(|spec| set_has_high_byte_escape(spec));
-        if byte_mode && set1.iter().all(|c| (*c as u32) <= u8::MAX as u32) {
-            let set2 = if non_flag_args.len() >= 2 {
-                match expand_char_set(&non_flag_args[1]) {
-                    Ok(set) => Some(set),
-                    Err(msg) => return Ok(Self::err(&msg, 1)),
-                }
-            } else {
-                None
-            };
-            if set2
-                .as_ref()
-                .is_none_or(|set| set.iter().all(|c| (*c as u32) <= u8::MAX as u32))
-            {
-                let output = translate_bytes(
-                    stdin.as_bytes(),
-                    &set1,
-                    set2.as_deref(),
-                    delete,
-                    squeeze,
-                    complement,
-                );
-                return Ok(ExecResult::ok_bytes(output));
-            }
-        }
-        if complement {
-            // Complement: use all byte-range chars (0-255) NOT in set1.
-            // Covers full Latin-1 range so binary data from /dev/urandom
-            // (where each byte maps to one char) is handled correctly.
-            let original = set1.clone();
-            set1 = (0u16..=255)
-                .map(|b| b as u8 as char)
-                .filter(|c| !original.contains(c))
-                .collect();
-        }
-
-        let stdin = &*stdin;
-
-        let result = if delete && squeeze {
-            // -ds: delete SET1 chars, then squeeze SET2 chars
-            let set2 = if non_flag_args.len() >= 2 {
-                match expand_char_set(&non_flag_args[1]) {
-                    Ok(set) => set,
-                    Err(msg) => return Ok(Self::err(&msg, 1)),
-                }
-            } else {
-                set1.clone()
-            };
-            let after_delete: String = stdin.chars().filter(|c| !set1.contains(c)).collect();
-            squeeze_chars(&after_delete, &set2)
-        } else if delete {
-            stdin
-                .chars()
-                .filter(|c| !set1.contains(c))
-                .collect::<String>()
-        } else if squeeze && non_flag_args.len() < 2 {
-            // -s with only SET1: squeeze characters in SET1
-            squeeze_chars(stdin, &set1)
-        } else {
-            if non_flag_args.len() < 2 {
-                return Ok(Self::err("missing operand after SET1", 1));
-            }
-
-            let set2 = match expand_char_set(&non_flag_args[1]) {
-                Ok(set) => set,
+        // GNU tr works on bytes: every SET element is a byte, and input is
+        // translated byte by byte whatever its encoding.
+        let set2 = match non_flag_args.get(1) {
+            Some(spec) => match expand_char_set(spec) {
+                Ok(set) => Some(set),
                 Err(msg) => return Ok(Self::err(&msg, 1)),
-            };
-
-            let translated: String = stdin
-                .chars()
-                .map(|c| {
-                    if let Some(pos) = set1.iter().position(|&x| x == c) {
-                        *set2.get(pos).or(set2.last()).unwrap_or(&c)
-                    } else {
-                        c
-                    }
-                })
-                .collect();
-
-            if squeeze {
-                squeeze_chars(&translated, &set2)
-            } else {
-                translated
-            }
+            },
+            // `-ds` with one SET squeezes that SET after deleting.
+            None if delete && squeeze => Some(set1.clone()),
+            None => None,
         };
-
-        Ok(ExecResult::ok(result))
+        let stdin = ctx.stdin.cloned().unwrap_or_default();
+        let output = translate_bytes(
+            stdin.as_bytes(),
+            &set1,
+            set2.as_deref(),
+            delete,
+            squeeze,
+            complement,
+        );
+        Ok(ExecResult::ok_bytes(output))
     }
 }
 
@@ -497,21 +425,6 @@ fn translate_bytes(
     output
 }
 
-/// Squeeze repeated consecutive characters that are in the given set
-fn squeeze_chars(s: &str, set: &[char]) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut last_char: Option<char> = None;
-
-    for c in s.chars() {
-        if set.contains(&c) && last_char == Some(c) {
-            continue; // skip repeated char in squeeze set
-        }
-        result.push(c);
-        last_char = Some(c);
-    }
-    result
-}
-
 /// One element of a tr SET operand: a character and whether it came from a
 /// backslash escape (an escaped `-`, `[` or `:` is literal).
 #[derive(Clone, Copy, PartialEq)]
@@ -531,10 +444,14 @@ fn set_atoms(spec: &str) -> Vec<SetAtom> {
         let c = chars[i];
         i += 1;
         if c != '\\' || i == chars.len() {
-            atoms.push(SetAtom {
-                ch: c,
-                escaped: false,
-            });
+            // A literal non-ASCII character is its UTF-8 bytes.
+            let mut buf = [0; 4];
+            for &byte in c.encode_utf8(&mut buf).as_bytes() {
+                atoms.push(SetAtom {
+                    ch: char::from(byte),
+                    escaped: false,
+                });
+            }
             continue;
         }
         let next = chars[i];
@@ -565,14 +482,6 @@ fn set_atoms(spec: &str) -> Vec<SetAtom> {
         atoms.push(SetAtom { ch, escaped: true });
     }
     atoms
-}
-
-/// Whether a SET operand names a byte 0x80-0xFF with an octal escape, which
-/// only makes sense byte-wise (GNU tr always works on bytes).
-fn set_has_high_byte_escape(spec: &str) -> bool {
-    set_atoms(spec)
-        .iter()
-        .any(|atom| atom.escaped && (0x80..=0xFF).contains(&(atom.ch as u32)))
 }
 
 /// Expand a character set specification like "a-z" into a list of characters.
@@ -1021,18 +930,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_tr_multibyte_utf8() {
-        // Translate multi-byte chars: ä -> x
+        // GNU tr works on bytes: ä is two bytes, each mapped to x.
         let result = run_tr(&["ä", "x"], Some("hällo\n")).await;
         assert_eq!(result.exit_code, 0);
-        assert_eq!(result.stdout, "hxllo\n");
+        assert_eq!(result.stdout, "hxxllo\n");
     }
 
     #[tokio::test]
     async fn test_tr_multibyte_utf8_range() {
-        // Multi-byte char in set preserved (not corrupted)
+        // SET1 "über" is five bytes; SET2's last byte pads the rest (GNU).
         let result = run_tr(&["über", "UBER"], Some("über\n")).await;
         assert_eq!(result.exit_code, 0);
-        assert_eq!(result.stdout, "UBER\n");
+        assert_eq!(result.stdout, "UBERR\n");
     }
 
     #[tokio::test]
@@ -1044,22 +953,23 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_char_set_rejects_large_unicode_range() {
-        let err = expand_char_set("a-\u{10ffff}").unwrap_err();
+    fn test_expand_char_set_rejects_large_expansion() {
+        let err = expand_char_set(&"\\000-\\377".repeat(17)).unwrap_err();
         assert_eq!(err, "character set expansion too large");
     }
 
     #[tokio::test]
-    async fn test_tr_rejects_large_unicode_range() {
-        let result = run_tr(&["a-\u{10ffff}", "x"], Some("abc")).await;
+    async fn test_tr_rejects_large_expansion() {
+        let result = run_tr(&[&"\\000-\\377".repeat(17), "x"], Some("abc")).await;
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.stderr, "tr: character set expansion too large\n");
     }
 
     #[test]
     fn test_expand_char_set_multibyte() {
-        let chars = expanded("äöü");
-        assert_eq!(chars, vec!['ä', 'ö', 'ü']);
+        // Each UTF-8 byte of a literal is its own SET element.
+        let chars = expanded("äö");
+        assert_eq!(chars, vec!['\u{c3}', '\u{a4}', '\u{c3}', '\u{b6}']);
     }
 
     #[tokio::test]
