@@ -248,3 +248,16 @@ printf '%q\n' "it's"
 ### expect
 it\'s
 ### end
+
+### printf_hex_and_octal_escapes_are_bytes
+# \xHH and \NNN are single bytes even when they are not valid UTF-8
+printf '\xff' | wc -c
+printf '\377\200' | wc -c
+printf '%b' '\xfe' | wc -c
+printf 'a\xffb\n' | cat -v
+### expect
+1
+2
+1
+aM-^?b
+### end

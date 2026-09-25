@@ -61,15 +61,18 @@ impl Builtin for Printf {
             if is_internal_variable(&name) {
                 return Ok(ExecResult::ok(String::new()));
             }
-            ctx.variables.insert(name, output);
+            ctx.variables
+                .insert(name, String::from_utf8_lossy(&output).into_owned());
             Ok(ExecResult::ok(String::new()))
         } else {
-            Ok(ExecResult::ok(output))
+            Ok(ExecResult::ok_bytes(output))
         }
     }
 }
 
-fn render_printf(format: &str, args: &[String]) -> std::result::Result<String, String> {
+/// Render to bytes: escapes such as `\xff` and `\377` are single bytes, as in
+/// bash, even when they do not form valid UTF-8.
+fn render_printf(format: &str, args: &[String]) -> std::result::Result<Vec<u8>, String> {
     let format = strip_zero_hex_escapes(format);
     let format = format.as_ref();
     let values = format_arguments(args);
@@ -83,7 +86,7 @@ fn render_printf(format: &str, args: &[String]) -> std::result::Result<String, S
     fmt_args.start_next_batch();
 
     if stopped || !format_seen {
-        return Ok(bytes_to_stdout_string(out));
+        return Ok(out);
     }
 
     while !fmt_args.is_exhausted() {
@@ -93,11 +96,7 @@ fn render_printf(format: &str, args: &[String]) -> std::result::Result<String, S
         fmt_args.start_next_batch();
     }
 
-    Ok(bytes_to_stdout_string(out))
-}
-
-fn bytes_to_stdout_string(bytes: Vec<u8>) -> String {
-    String::from_utf8_lossy(&bytes).into_owned()
+    Ok(out)
 }
 
 fn strip_zero_hex_escapes(input: &str) -> Cow<'_, str> {
@@ -522,27 +521,33 @@ mod tests {
     fn generated_formatter_repeats_format_until_args_exhausted() {
         assert_eq!(
             render_printf("%s=%d ", &["a".into(), "1".into(), "b".into(), "2".into()]).unwrap(),
-            "a=1 b=2 "
+            b"a=1 b=2 "
         );
     }
 
     #[test]
     fn generated_formatter_handles_escapes_and_quotes() {
-        assert_eq!(render_printf("a\\nb", &[]).unwrap(), "a\nb");
+        assert_eq!(render_printf("a\\nb", &[]).unwrap(), b"a\nb");
         assert_eq!(
             render_printf("%q", &["hello world".into()]).unwrap(),
-            "hello\\ world"
+            b"hello\\ world"
         );
     }
 
     #[test]
     fn strips_zero_hex_escapes_at_stdout_boundary() {
-        assert_eq!(render_printf("a\\x00b", &[]).unwrap(), "ab");
+        assert_eq!(render_printf("a\\x00b", &[]).unwrap(), b"ab");
     }
 
     #[test]
     fn preserves_octal_nul_for_zero_delimited_pipelines() {
-        assert_eq!(render_printf("a\\0b", &[]).unwrap().as_bytes(), b"a\0b");
+        assert_eq!(render_printf("a\\0b", &[]).unwrap(), b"a\0b");
+    }
+
+    #[test]
+    fn emits_hex_and_octal_escapes_as_single_bytes() {
+        assert_eq!(render_printf("\\xff\\376", &[]).unwrap(), b"\xff\xfe");
+        assert_eq!(render_printf("%b", &["\\xff".into()]).unwrap(), b"\xff");
     }
 
     #[test]
@@ -559,10 +564,10 @@ mod tests {
 
     #[test]
     fn zero_integer_with_explicit_zero_precision_emits_no_digits() {
-        assert_eq!(render_printf("<%.0d>", &["0".into()]).unwrap(), "<>");
-        assert_eq!(render_printf("<%.0u>", &["0".into()]).unwrap(), "<>");
-        assert_eq!(render_printf("<%#.0x>", &["0".into()]).unwrap(), "<>");
-        assert_eq!(render_printf("<%#.0o>", &["0".into()]).unwrap(), "<0>");
+        assert_eq!(render_printf("<%.0d>", &["0".into()]).unwrap(), b"<>");
+        assert_eq!(render_printf("<%.0u>", &["0".into()]).unwrap(), b"<>");
+        assert_eq!(render_printf("<%#.0x>", &["0".into()]).unwrap(), b"<>");
+        assert_eq!(render_printf("<%#.0o>", &["0".into()]).unwrap(), b"<0>");
     }
 
     #[test]
