@@ -579,6 +579,14 @@ pub enum ExecutionPlan {
         /// Commands to execute in order.
         commands: Vec<SubCommand>,
     },
+    /// Run `env [-i] [NAME=VALUE]... COMMAND`: COMMAND sees the exported
+    /// environment, or only its assignments when `ignore_environment` is set.
+    Env {
+        /// The command, with the NAME=VALUE pairs as its assignments.
+        command: SubCommand,
+        /// `-i`: start COMMAND with an empty environment.
+        ignore_environment: bool,
+    },
     /// Run a sequence of commands, then merge builtin-generated stderr/exit semantics.
     BatchWithStatus {
         /// Commands to execute in order.

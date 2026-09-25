@@ -8663,6 +8663,23 @@ impl Interpreter {
                     ..Default::default()
                 }
             }
+            builtins::ExecutionPlan::Env {
+                command,
+                ignore_environment,
+            } => {
+                // COMMAND inherits only exported variables, or none with -i;
+                // its own assignments are added for its duration.
+                let saved_env = ignore_environment.then(|| std::mem::take(&mut self.env));
+                let inner_cmd = subcommand_to_command(&command);
+                let saved_stdin = self.pipeline_stdin.take();
+                self.pipeline_stdin = command.stdin;
+                let result = self.execute_command(&inner_cmd).await;
+                self.pipeline_stdin = saved_stdin;
+                if let Some(env) = saved_env {
+                    self.env = env;
+                }
+                result?
+            }
             builtins::ExecutionPlan::BatchWithStatus {
                 commands,
                 stderr_prefix,

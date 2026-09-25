@@ -55,3 +55,17 @@ env nosuch-command 2>/dev/null; echo "rc=$?"
 ### expect
 rc=127
 ### end
+
+### env_i_hides_inherited_variables
+# env -i runs COMMAND with only its own assignments
+export FOO=bar
+env -i printenv FOO; echo "rc=$?"
+env -i A=1 printenv
+env printenv FOO
+echo "after=$FOO"
+### expect
+rc=1
+A=1
+bar
+after=bar
+### end

@@ -115,15 +115,14 @@ impl Builtin for Env {
         let Some((name, args)) = parsed.command.split_first() else {
             return Ok(None); // No command: execute() prints the environment
         };
-        // `-i` cannot clear inherited variables here: the plan can only add
-        // command-scoped assignments.
-        Ok(Some(ExecutionPlan::Batch {
-            commands: vec![SubCommand {
+        Ok(Some(ExecutionPlan::Env {
+            command: SubCommand {
                 name: name.clone(),
                 args: args.to_vec(),
                 stdin: ctx.stdin.cloned(),
                 assignments: parsed.assignments,
-            }],
+            },
+            ignore_environment: parsed.ignore_env,
         }))
     }
 }
