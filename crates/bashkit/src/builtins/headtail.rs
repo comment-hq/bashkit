@@ -252,8 +252,11 @@ async fn run(cmd: &str, ctx: Context<'_>) -> Result<ExecResult> {
             match ctx.fs.read_file(&path).await {
                 Ok(content) => content,
                 Err(e) => {
+                    // GNU head and tail word an unopenable operand this way.
                     let reason = crate::error::io_error_reason(&e);
-                    stderr.push_str(&format!("{cmd}: {file}: {reason}\n"));
+                    stderr.push_str(&format!(
+                        "{cmd}: cannot open '{file}' for reading: {reason}\n"
+                    ));
                     continue;
                 }
             }

@@ -253,3 +253,14 @@ s
 ==> /tmp/ht_file <==
 f
 ### end
+
+### headtail_missing_file_message
+# GNU head and tail name an unopenable operand in their own wording
+head -n 1 /tmp/ht_nowhere 2>&1
+tail -n 1 /tmp/ht_nowhere 2>&1
+echo "rc=$?"
+### expect
+head: cannot open '/tmp/ht_nowhere' for reading: No such file or directory
+tail: cannot open '/tmp/ht_nowhere' for reading: No such file or directory
+rc=1
+### end
