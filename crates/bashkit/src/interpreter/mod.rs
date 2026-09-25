@@ -6807,6 +6807,44 @@ impl Interpreter {
             .await
     }
 
+    /// True if `env` can run `name`: a builtin, an existing path, a `$PATH`
+    /// match, or a name the host resolver knows. Shell functions do not count.
+    async fn env_command_exists(&self, name: &str) -> bool {
+        if Self::is_special_builtin_name(name)
+            || self.has_host_builtin(name)
+            || self.builtins.contains_key(name)
+        {
+            return true;
+        }
+        if name.contains('/') {
+            return self.fs.stat(&self.resolve_path(name)).await.is_ok();
+        }
+        if self.resolve_command_path(name).await.is_some() {
+            return true;
+        }
+        self.command_resolver.as_ref().is_some_and(|resolver| {
+            std::panic::catch_unwind(AssertUnwindSafe(|| resolver.resolve(name)))
+                .ok()
+                .flatten()
+                .is_some()
+        })
+    }
+
+    /// Quote `s` in a coreutils diagnostic the way GNU `quote()` does: curly
+    /// quotes in the default UTF-8 locale, ASCII quotes under `LC_ALL=C`.
+    fn locale_quote(&self, s: &str) -> String {
+        let locale = self
+            .scoped
+            .variables
+            .get("LC_ALL")
+            .or_else(|| self.env.get("LC_ALL"));
+        if locale.is_some_and(|l| l == "C" || l == "POSIX") {
+            format!("'{s}'")
+        } else {
+            format!("\u{2018}{s}\u{2019}")
+        }
+    }
+
     /// Search $PATH for an executable script and run it.
     ///
     /// Returns `Ok(None)` if no matching file found (caller emits "command not found").
@@ -8667,17 +8705,32 @@ impl Interpreter {
                 command,
                 ignore_environment,
             } => {
-                // COMMAND inherits only exported variables, or none with -i;
-                // its own assignments are added for its duration.
-                let saved_env = ignore_environment.then(|| std::mem::take(&mut self.env));
-                let inner_cmd = subcommand_to_command(&command);
-                let saved_stdin = self.pipeline_stdin.take();
-                self.pipeline_stdin = command.stdin;
-                let result = self.execute_command(&inner_cmd).await;
-                self.pipeline_stdin = saved_stdin;
-                if let Some(env) = saved_env {
-                    self.env = env;
-                }
+                // env execs COMMAND as a program: shell functions are not
+                // visible, and a missing COMMAND is reported by env itself.
+                let saved_functions = std::mem::take(&mut self.scoped.functions);
+                let result = if self.env_command_exists(&command.name).await {
+                    // COMMAND inherits only exported variables, or none with
+                    // -i; its own assignments are added for its duration.
+                    let saved_env = ignore_environment.then(|| std::mem::take(&mut self.env));
+                    let inner_cmd = subcommand_to_command(&command);
+                    let saved_stdin = self.pipeline_stdin.take();
+                    self.pipeline_stdin = command.stdin;
+                    let result = self.execute_command(&inner_cmd).await;
+                    self.pipeline_stdin = saved_stdin;
+                    if let Some(env) = saved_env {
+                        self.env = env;
+                    }
+                    result
+                } else {
+                    Ok(ExecResult::err(
+                        format!(
+                            "env: {}: No such file or directory\n",
+                            self.locale_quote(&command.name)
+                        ),
+                        127,
+                    ))
+                };
+                self.scoped.functions = saved_functions;
                 result?
             }
             builtins::ExecutionPlan::BatchWithStatus {

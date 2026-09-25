@@ -50,10 +50,25 @@ rc=1
 ### end
 
 ### env_missing_command
-### bash_diff: GNU env reports "env: 'nosuch': No such file or directory"
-env nosuch-command 2>/dev/null; echo "rc=$?"
+# env reports a missing COMMAND itself, with GNU quote() quoting
+env nosuch-command 2>&1; echo "rc=$?"
+LC_ALL=C env nosuch-command 2>&1
 ### expect
+env: ‘nosuch-command’: No such file or directory
 rc=127
+env: 'nosuch-command': No such file or directory
+### end
+
+### env_skips_shell_functions
+# env runs programs, not shell functions
+greet() { echo function; }
+env greet 2>&1; echo "rc=$?"
+echo() { printf 'function echo\n'; }
+env echo builtin
+### expect
+env: ‘greet’: No such file or directory
+rc=127
+builtin
 ### end
 
 ### env_i_hides_inherited_variables
