@@ -7490,6 +7490,18 @@ echo missing fi"#,
     }
 
     #[tokio::test]
+    async fn test_streaming_equivalence_loop_into_pipeline() {
+        // A loop writing into a pipe streams nothing itself: only what the
+        // pipeline's last stage prints is output.
+        assert_streaming_equivalence("for i in 1 2 3; do echo $i; done | wc -l").await;
+        assert_streaming_equivalence(
+            "f() { for i in a b; do echo $i; done; }; f | tr a-z A-Z; echo end",
+        )
+        .await;
+        assert_streaming_equivalence("{ echo x; for i in 1 2; do echo $i >&2; done; } | cat").await;
+    }
+
+    #[tokio::test]
     async fn test_streaming_equivalence_conditionals() {
         assert_streaming_equivalence("if true; then echo yes; else echo no; fi; echo done").await;
     }

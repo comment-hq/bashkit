@@ -5142,23 +5142,20 @@ impl Interpreter {
         for (i, command) in pipeline.commands.iter().enumerate() {
             let is_last = i == pipeline.commands.len() - 1;
 
-            let result = match command {
-                Command::Simple(simple) => {
-                    self.execution_budget.consume_work(1)?;
-                    self.counters.tick_command(&self.limits)?;
-                    self.execute_simple_command(simple, stdin_data.take())
-                        .await?
-                }
-                _ => {
-                    // Compound commands, lists, etc. in pipeline:
-                    // set pipeline_stdin so inner commands (read, cat, etc.) can consume it
-                    let prev_pipeline_stdin = self.pipeline_stdin.take();
-                    self.pipeline_stdin = stdin_data.take();
-                    let result = self.execute_command(command).await?;
-                    self.pipeline_stdin = prev_pipeline_stdin;
-                    result
-                }
+            // A stage before the last writes into the pipe, so a loop inside it
+            // must not stream: what streams is the pipeline's own output.
+            let saved_callback = if is_last {
+                None
+            } else {
+                self.output_callback.take()
             };
+            let result = self
+                .execute_pipeline_stage(command, stdin_data.take())
+                .await;
+            if let Some(callback) = saved_callback {
+                self.output_callback = Some(callback);
+            }
+            let result = result?;
 
             pipe_statuses.push(result.exit_code);
             if !pipeline_stderr_truncated {
@@ -5205,6 +5202,28 @@ impl Interpreter {
         }
 
         Ok(last_result)
+    }
+
+    async fn execute_pipeline_stage(
+        &mut self,
+        command: &Command,
+        stdin: Option<crate::StreamData>,
+    ) -> Result<ExecResult> {
+        match command {
+            Command::Simple(simple) => {
+                self.execution_budget.consume_work(1)?;
+                self.counters.tick_command(&self.limits)?;
+                self.execute_simple_command(simple, stdin).await
+            }
+            _ => {
+                // Compound commands, lists, etc. in pipeline:
+                // set pipeline_stdin so inner commands (read, cat, etc.) can consume it
+                let prev_pipeline_stdin = std::mem::replace(&mut self.pipeline_stdin, stdin);
+                let result = self.execute_command(command).await?;
+                self.pipeline_stdin = prev_pipeline_stdin;
+                Ok(result)
+            }
+        }
     }
 
     /// Check if a command is the empty sentinel produced by the parser for trailing `&`.
