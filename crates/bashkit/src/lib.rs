@@ -7502,6 +7502,22 @@ echo missing fi"#,
     }
 
     #[tokio::test]
+    async fn test_streaming_failed_pipeline_keeps_earlier_stderr() {
+        // When a later stage fails, what earlier stages wrote to stderr still streams.
+        let stderr: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let se = stderr.clone();
+        let mut bash = Bash::new();
+        let result = bash
+            .exec_streaming(
+                "for i in 1; do echo important >&2; done | { echo visible; f() { f; }; f; }",
+                Box::new(move |_, err| se.lock().unwrap().push_str(&err.to_string())),
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(*stderr.lock().unwrap(), "important\n");
+    }
+
+    #[tokio::test]
     async fn test_streaming_equivalence_conditionals() {
         assert_streaming_equivalence("if true; then echo yes; else echo no; fi; echo done").await;
     }

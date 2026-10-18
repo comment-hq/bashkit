@@ -5155,7 +5155,15 @@ impl Interpreter {
             if let Some(callback) = saved_callback {
                 self.output_callback = Some(callback);
             }
-            let result = result?;
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    // The earlier stages' stderr would otherwise go with the pipeline's result.
+                    let count = self.output_emit_count;
+                    self.maybe_emit_output(&crate::StreamData::new(), &pipeline_stderr, count);
+                    return Err(error);
+                }
+            };
 
             pipe_statuses.push(result.exit_code);
             if !pipeline_stderr_truncated {
