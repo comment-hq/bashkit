@@ -9,7 +9,7 @@ use super::glob_match;
 use crate::builtins::limits::FIND_MAX_OUTPUT_BYTES;
 use crate::builtins::{Builtin, Context, ExecutionPlan, SubCommand, resolve_path};
 use crate::error::Result;
-use crate::fs::vfs_join;
+use crate::fs::{Metadata, vfs_join};
 use crate::interpreter::{ControlFlow, ExecResult};
 
 /// Options for find command
@@ -275,8 +275,17 @@ async fn collect_find_plan_data(
         // Exec planning collects the full match set; an output cap would
         // silently drop entries and run `-exec` on a partial list, so this
         // pass is uncapped.
-        if let Err(e) =
-            find_recursive(ctx, &path, path_str, &temp_opts, 0, &mut output, usize::MAX).await
+        if let Err(e) = find_recursive(
+            ctx,
+            &path,
+            None,
+            path_str,
+            &temp_opts,
+            0,
+            &mut output,
+            usize::MAX,
+        )
+        .await
         {
             errors.push_str(&format!("find: '{}': {}\n", path_str, e));
             had_error = true;
@@ -384,6 +393,7 @@ impl Builtin for Find {
             if let Err(e) = find_recursive(
                 &ctx,
                 &path,
+                None,
                 path_str,
                 &opts,
                 0,
@@ -450,9 +460,14 @@ impl Builtin for Find {
     }
 }
 
+/// `metadata` is the entry's, when its directory listing already gave it: a
+/// filesystem whose `stat` is a round trip then pays one per directory, not
+/// one per entry.
+#[allow(clippy::too_many_arguments)]
 fn find_recursive<'a>(
     ctx: &'a Context<'_>,
     path: &'a Path,
+    metadata: Option<Metadata>,
     display_path: &'a str,
     opts: &'a FindOptions,
     current_depth: usize,
@@ -461,7 +476,10 @@ fn find_recursive<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async move {
         // Check if this entry matches
-        let metadata = ctx.fs.stat(path).await?;
+        let metadata = match metadata {
+            Some(metadata) => metadata,
+            None => ctx.fs.stat(path).await?,
+        };
         let entry_name = Path::new(display_path)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -545,6 +563,7 @@ fn find_recursive<'a>(
                 find_recursive(
                     ctx,
                     &child_path,
+                    Some(entry.metadata),
                     &child_display,
                     opts,
                     current_depth + 1,

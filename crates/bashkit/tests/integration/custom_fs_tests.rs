@@ -551,3 +551,77 @@ async fn test_custom_fs_nested_dir_does_not_inherit_file_size() {
         nested.metadata.size
     );
 }
+
+/// Counts `stat` calls, for a filesystem where each one is a round trip.
+struct StatCountingFs {
+    inner: InMemoryFs,
+    stats: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl FileSystemExt for StatCountingFs {}
+
+#[async_trait]
+impl FileSystem for StatCountingFs {
+    async fn read_file(&self, path: &Path) -> Result<Vec<u8>> {
+        self.inner.read_file(path).await
+    }
+    async fn write_file(&self, path: &Path, content: &[u8]) -> Result<()> {
+        self.inner.write_file(path, content).await
+    }
+    async fn append_file(&self, path: &Path, content: &[u8]) -> Result<()> {
+        self.inner.append_file(path, content).await
+    }
+    async fn mkdir(&self, path: &Path, recursive: bool) -> Result<()> {
+        self.inner.mkdir(path, recursive).await
+    }
+    async fn remove(&self, path: &Path, recursive: bool) -> Result<()> {
+        self.inner.remove(path, recursive).await
+    }
+    async fn stat(&self, path: &Path) -> Result<Metadata> {
+        self.stats.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.stat(path).await
+    }
+    async fn read_dir(&self, path: &Path) -> Result<Vec<DirEntry>> {
+        self.inner.read_dir(path).await
+    }
+    async fn exists(&self, path: &Path) -> Result<bool> {
+        self.inner.exists(path).await
+    }
+    async fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        self.inner.rename(from, to).await
+    }
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
+        self.inner.copy(from, to).await
+    }
+    async fn symlink(&self, target: &Path, link: &Path) -> Result<()> {
+        self.inner.symlink(target, link).await
+    }
+    async fn read_link(&self, path: &Path) -> Result<PathBuf> {
+        self.inner.read_link(path).await
+    }
+    async fn chmod(&self, path: &Path, mode: u32) -> Result<()> {
+        self.inner.chmod(path, mode).await
+    }
+}
+
+#[tokio::test]
+async fn test_find_stats_only_its_starting_points() {
+    let fs = Arc::new(StatCountingFs {
+        inner: InMemoryFs::new(),
+        stats: Default::default(),
+    });
+    fs.mkdir(Path::new("/data/sub"), true).await.unwrap();
+    for file in ["/data/a.txt", "/data/sub/b.txt", "/data/sub/c.md"] {
+        fs.write_file(Path::new(file), b"12345").await.unwrap();
+    }
+    let mut bash = Bash::builder().fs(fs.clone()).build();
+    let before = fs.stats.load(std::sync::atomic::Ordering::SeqCst);
+    let result = bash.exec("find /data -type f -name '*.txt'").await.unwrap();
+    assert_eq!(result.stdout, "/data/a.txt\n/data/sub/b.txt\n");
+    // The directory listings give every entry's metadata; only /data is stat'd.
+    assert_eq!(
+        fs.stats.load(std::sync::atomic::Ordering::SeqCst) - before,
+        1
+    );
+}
