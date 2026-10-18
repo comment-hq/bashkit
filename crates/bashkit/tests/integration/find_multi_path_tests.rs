@@ -243,3 +243,33 @@ async fn find_dangling_not_fails_closed() {
         result.stderr
     );
 }
+
+/// find's output is bounded by the run's stdout limit rather than a fixed
+/// 1 MiB, so `find | wc -l` counts every entry a host allows; past the limit
+/// it says the list stops there.
+#[tokio::test]
+async fn find_output_follows_the_stdout_limit() {
+    let script = "mkdir -p /tmp/d && touch /tmp/d/f{1..2000} \
+        && find /tmp/d -type f -printf \"%p $(printf '%600s' '')\\n\" | wc -l";
+    let mut roomy = Bash::builder()
+        .limits(bashkit::ExecutionLimits::new().max_stdout_bytes(4 << 20))
+        .build();
+    let result = roomy.exec(script).await.unwrap();
+    assert_eq!(result.stdout.trim(), "2000");
+    assert!(result.stderr.is_empty(), "{}", result.stderr);
+
+    let mut default = Bash::builder().build();
+    let result = default.exec(script).await.unwrap();
+    let counted: usize = result.stdout.trim().parse().unwrap();
+    assert!(
+        counted < 2000,
+        "a 1 MiB limit stops the 1.2 MB list: {counted}"
+    );
+    assert!(
+        result
+            .stderr
+            .contains("find: output size limit exceeded; the list stops there"),
+        "{}",
+        result.stderr
+    );
+}

@@ -11,6 +11,7 @@ use crate::builtins::{Builtin, Context, ExecutionPlan, SubCommand, resolve_path}
 use crate::error::Result;
 use crate::fs::{Metadata, vfs_join};
 use crate::interpreter::{ControlFlow, ExecResult};
+use crate::limits::ExecutionLimits;
 
 /// Options for find command
 pub(super) struct FindOptions {
@@ -378,6 +379,7 @@ impl Builtin for Find {
         let mut output = String::new();
         let mut errors = String::new();
         let mut had_error = false;
+        let output_cap = find_output_cap(&ctx);
 
         for path_str in &search_paths {
             let path = resolve_path(ctx.cwd, path_str);
@@ -398,7 +400,7 @@ impl Builtin for Find {
                 &opts,
                 0,
                 &mut output,
-                FIND_MAX_OUTPUT_BYTES,
+                output_cap,
             )
             .await
             {
@@ -578,7 +580,17 @@ fn find_recursive<'a>(
     })
 }
 
-const OUTPUT_CAP_MSG: &str = "output size limit exceeded";
+const OUTPUT_CAP_MSG: &str =
+    "output size limit exceeded; the list stops there (narrow it with a path, -name or -type)";
+
+/// find's stdout cap: the run's `max_stdout_bytes`, as for `rg` and `jq`, so a
+/// host that allows more output gets complete listings; outside a run,
+/// [`FIND_MAX_OUTPUT_BYTES`].
+fn find_output_cap(ctx: &Context<'_>) -> usize {
+    ctx.execution_extension::<ExecutionLimits>()
+        .and_then(|limits| limits.try_with(|limits| limits.max_stdout_bytes).ok())
+        .unwrap_or(FIND_MAX_OUTPUT_BYTES)
+}
 
 /// Append `value` to `output`, returning an error if the total would exceed `cap`.
 fn push_find_output(output: &mut String, value: &str, cap: usize) -> crate::error::Result<()> {
